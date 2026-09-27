@@ -1,0 +1,500 @@
+"""Auditable control tests over synthetic source extracts.
+
+The rules produce *candidate findings*. A human reviewer makes audit conclusions.
+The expected-results manifest is intentionally not read by this module.
+"""
+
+from __future__ import annotations
+
+import hashlib
+from datetime import timedelta
+from typing import Any
+
+from controltrace.data import DEMO_CUTOFF, PRIMARY_KEYS, parse_utc
+
+RULES: dict[str, dict[str, Any]] = {
+    "CT-01": {
+        "name": "账号生命周期与转岗权限",
+        "control_goal": "离职账号及时停用，转岗人员及时移除原部门专属权限。",
+        "inputs": [
+            "hr_events.employee_id/event_type/event_at/from_department/to_department",
+            "accounts.employee_id/created_at/disabled_at",
+            "entitlements.account_id/role_id/granted_at/revoked_at",
+            "roles.owner_department",
+        ],
+        "logic": "离职后48小时内停用账号；转岗后5×24小时内撤销原部门专属角色。所有时间均为UTC，等于期限视为按时。",
+        "exceptions": "共享角色（owner_department=GLOBAL）不视为原部门权限；来源缺少原部门时列为待人工判断。",
+        "limitations": "账号停用时间及角色归属来自模拟抽取；无法判断企业批准的延长期或系统外补偿控制。",
+        "threshold": "offboarding=48 hours; transfer=5 days",
+    },
+    "CT-02": {
+        "name": "高权限审批与周期复核",
+        "control_goal": "高权限在授予前获有效批准，并在规定期限内完成权限复核。",
+        "inputs": [
+            "roles.is_privileged", "entitlements.request_id/granted_at/revoked_at",
+            "access_requests.account_id/role_id/submitted_at",
+            "access_approvals.decision/decided_at/valid_until",
+            "access_reviews.period_end/due_at/completed_at",
+        ],
+        "logic": "批准必须关联同一账号和角色、决定为APPROVED，且决定时间不晚于授予、有效期不早于授予。复核完成时间不得晚于due_at。",
+        "exceptions": "审批检查截止日前全部高权限授予；复核只检查到期时仍有效的授权。未到复核到期日不判逾期；有效授权无复核记录列为人工核实。职责冲突由CT-03单独检测。",
+        "limitations": "本测试依赖审批和复核导出完整性；缺少源记录是证据缺口，最终定性仍需核对原系统。",
+        "threshold": "approval <= grant; review completion <= due_at",
+    },
+    "CT-03": {
+        "name": "敏感权限职责分离",
+        "control_goal": "敏感权限申请和批准不得由同一人完成。",
+        "inputs": [
+            "access_requests.requester_id/role_id", "access_approvals.approver_id/decision",
+            "role_permissions.is_sensitive",
+        ],
+        "logic": "已批准的敏感角色申请中，requester_id等于approver_id即命中。",
+        "exceptions": "只检查角色含敏感权限且存在APPROVED决定的申请；其他职责冲突组合暂未覆盖。",
+        "limitations": "不同人员ID可能对应同一自然人，或同一共享账号可能代表多人；本演示无法识别这类身份映射。",
+        "threshold": "requester_id != approver_id",
+    },
+    "CT-04": {
+        "name": "生产变更事前控制",
+        "control_goal": "标准生产部署有同系统工单，且审批与测试在部署前完成。",
+        "inputs": [
+            "deployments.deployment_id/system_id/ticket_id/commit_id/deployed_at/deployment_type",
+            "change_tickets.system_id/approved_at/tested_at",
+            "code_commits.ticket_id/committed_at",
+        ],
+        "logic": "标准部署须关联同系统工单，approved_at和tested_at不晚于deployed_at；缺失时间列为待人工判断。",
+        "exceptions": "标记为EMERGENCY的部署适用CT-05补批控制，不按标准变更的事前审批/测试口径测试。",
+        "limitations": "时间戳证明记录顺序，不证明测试质量、审批独立性、代码内容或部署范围。",
+        "threshold": "ticket exists; approval/test <= deployment",
+    },
+    "CT-05": {
+        "name": "应急变更补充审批",
+        "control_goal": "应急生产部署在24小时内取得补充审批。",
+        "inputs": [
+            "deployments.deployment_type/deployed_at", "emergency_changes.deployment_id",
+            "emergency_changes.retrospective_approved_at/retrospective_approver_id",
+        ],
+        "logic": "补批时间不得晚于部署后24小时；超过期限仍无补批或补批过晚则命中。截止日时限尚未届满列为待人工判断。",
+        "exceptions": "恰在24小时期限完成补批视为按时；仍在开放窗口内的案件不能判为逾期。",
+        "limitations": "只测试时间和记录存在性；紧急程度、补批权限与变更合理性需人工阅读原始材料。",
+        "threshold": "retrospective approval <= deployment + 24 hours",
+    },
+}
+
+_TIMELINE_FIELDS = {
+    "hr_events": [("event_at", "HR事件", "event")],
+    "accounts": [("created_at", "账号创建", "event"), ("disabled_at", "账号停用", "event")],
+    "entitlements": [("granted_at", "权限授予", "event"), ("revoked_at", "权限撤销", "event")],
+    "access_requests": [("submitted_at", "权限申请", "event")],
+    "access_approvals": [("decided_at", "权限审批", "event")],
+    "access_reviews": [
+        ("due_at", "复核期限", "deadline"), ("completed_at", "复核完成", "event")
+    ],
+    "change_tickets": [
+        ("submitted_at", "工单提交", "event"), ("approved_at", "变更审批", "event"),
+        ("tested_at", "变更测试", "event"),
+    ],
+    "code_commits": [("committed_at", "代码提交", "event")],
+    "deployments": [("deployed_at", "生产部署", "event")],
+    "emergency_changes": [
+        ("declared_at", "应急声明", "event"),
+        ("retrospective_approved_at", "应急补批", "event"),
+    ],
+}
+
+
+def _index(rows: list[dict], field: str) -> dict[str, dict]:
+    return {row[field]: row for row in rows}
+
+
+def _finding(
+    control_id: str,
+    issue_code: str,
+    title: str,
+    classification: str,
+    risk: str,
+    system: str,
+    occurred_at: str,
+    entity_type: str,
+    entity_id: str,
+    summary: str,
+    rationale: str,
+    evidence: list[tuple[str, dict | None]],
+) -> dict[str, Any]:
+    unique: dict[tuple[str, str], tuple[str, dict]] = {}
+    for table, record in evidence:
+        if record is not None:
+            record_id = str(record[PRIMARY_KEYS[table]])
+            unique[(table, record_id)] = (table, record)
+    related = [
+        {"table": table, "id": str(record[PRIMARY_KEYS[table]]), "record": record.copy()}
+        for table, record in unique.values()
+    ]
+    timeline = []
+    for item in related:
+        record = item["record"]
+        for field, label, kind in _TIMELINE_FIELDS.get(item["table"], []):
+            if record.get(field):
+                timeline.append({
+                    "at": record[field], "event": label, "kind": kind,
+                    "field": field, "evidence_id": item["id"],
+                    "source_system": record["source_system"],
+                })
+    timeline.sort(key=lambda item: (item["at"], item["evidence_id"], item["field"]))
+    digest = hashlib.sha256(f"{control_id}|{issue_code}|{entity_id}".encode()).hexdigest()[:12]
+    return {
+        "finding_id": f"F-{digest.upper()}",
+        "control_id": control_id,
+        "rule_id": control_id,
+        "issue_code": issue_code,
+        "title": title,
+        "classification": classification,
+        "risk": risk,
+        "severity": risk,
+        "system": system,
+        "system_id": system,
+        "occurred_at": occurred_at,
+        "period": occurred_at[:7],
+        "entity_type": entity_type,
+        "entity_id": entity_id,
+        "summary": summary,
+        "rationale": rationale,
+        "evidence_ids": [f"{item['table']}:{item['id']}" for item in related],
+        "timeline": timeline,
+        "related_records": related,
+        "rule": {"control_id": control_id, **RULES[control_id]},
+        "audit_cutoff": DEMO_CUTOFF,
+    }
+
+
+def evaluate(data: dict[str, list[dict]]) -> list[dict[str, Any]]:
+    """Evaluate five controls. No database writes; suitable for boundary testing."""
+    cutoff = parse_utc(DEMO_CUTOFF)
+    assert cutoff is not None
+    findings: list[dict[str, Any]] = []
+    accounts = data["accounts"]
+    roles = _index(data["roles"], "role_id")
+    accounts_by_id = _index(accounts, "account_id")
+    requests = _index(data["access_requests"], "request_id")
+    tickets = _index(data["change_tickets"], "ticket_id")
+    commits = _index(data["code_commits"], "commit_id")
+    permissions_by_role: dict[str, list[dict]] = {}
+    for permission in data["role_permissions"]:
+        permissions_by_role.setdefault(permission["role_id"], []).append(permission)
+    approvals_by_request: dict[str, list[dict]] = {}
+    for approval in data["access_approvals"]:
+        approvals_by_request.setdefault(approval["request_id"], []).append(approval)
+    reviews_by_entitlement: dict[str, list[dict]] = {}
+    for review in data["access_reviews"]:
+        reviews_by_entitlement.setdefault(review["entitlement_id"], []).append(review)
+    emergency_by_deployment = {
+        row["deployment_id"]: row for row in data["emergency_changes"]
+    }
+
+    # CT-01: HR events drive the window. A late disable or revoke still counts.
+    for event in data["hr_events"]:
+        event_at = parse_utc(event["event_at"])
+        assert event_at is not None
+        if event["event_type"] == "TERMINATION":
+            due = event_at + timedelta(hours=48)
+            if cutoff <= due:
+                continue
+            for account in accounts:
+                if account["employee_id"] != event["employee_id"]:
+                    continue
+                disabled = parse_utc(account["disabled_at"])
+                if disabled is None or disabled > due:
+                    findings.append(_finding(
+                        "CT-01", "terminated_account_open", "离职账号未按时停用",
+                        "exception", "high", account["system_id"], event["event_at"],
+                        "account", account["account_id"],
+                        "离职后48小时内未见账号停用。",
+                        f"HR离职事件 {event['event_id']} 时间为 {event['event_at']}；"
+                        f"停用期限为 {due.isoformat().replace('+00:00', 'Z')}；"
+                        f"账号 {account['account_id']} 停用时间为 {account['disabled_at'] or '空'}。",
+                        [("hr_events", event), ("accounts", account)],
+                    ))
+        elif event["event_type"] == "TRANSFER":
+            due = event_at + timedelta(days=5)
+            if cutoff <= due:
+                continue
+            for entitlement in data["entitlements"]:
+                account = accounts_by_id.get(entitlement["account_id"])
+                role = roles.get(entitlement["role_id"])
+                if not account or not role or account["employee_id"] != event["employee_id"]:
+                    continue
+                if role["owner_department"] in {"GLOBAL", event["to_department"]}:
+                    continue
+                granted = parse_utc(entitlement["granted_at"])
+                revoked = parse_utc(entitlement["revoked_at"])
+                if granted is None or granted > event_at or (revoked is not None and revoked <= due):
+                    continue
+                if event["from_department"] is None:
+                    findings.append(_finding(
+                        "CT-01", "transfer_department_unknown", "转岗前部门缺失，旧权限需核实",
+                        "manual_review", "medium", account["system_id"], event["event_at"],
+                        "entitlement", entitlement["entitlement_id"],
+                        "HR转岗记录缺少原部门，无法确认角色是否应撤销。",
+                        f"转岗事件 {event['event_id']} 原部门为空；角色 {role['role_id']} "
+                        f"归属 {role['owner_department']}，权限 {entitlement['entitlement_id']} "
+                        f"在期限 {due.isoformat().replace('+00:00', 'Z')} 后仍有效。",
+                        [("hr_events", event), ("accounts", account),
+                         ("entitlements", entitlement), ("roles", role)],
+                    ))
+                elif role["owner_department"] == event["from_department"]:
+                    findings.append(_finding(
+                        "CT-01", "transfer_old_role_retained", "转岗旧权限未按时撤销",
+                        "exception", "high", account["system_id"], event["event_at"],
+                        "entitlement", entitlement["entitlement_id"],
+                        "原部门专属角色在转岗后5天仍有效。",
+                        f"转岗事件 {event['event_id']} 从 {event['from_department']} "
+                        f"转入 {event['to_department']}，期限为 "
+                        f"{due.isoformat().replace('+00:00', 'Z')}；权限 "
+                        f"{entitlement['entitlement_id']} 撤销时间为 "
+                        f"{entitlement['revoked_at'] or '空'}。",
+                        [("hr_events", event), ("accounts", account),
+                         ("entitlements", entitlement), ("roles", role)],
+                    ))
+
+    # CT-02: test historical grant approvals and reviews due while access was active.
+    for entitlement in data["entitlements"]:
+        role = roles.get(entitlement["role_id"])
+        account = accounts_by_id.get(entitlement["account_id"])
+        if not role or not account or not role["is_privileged"]:
+            continue
+        granted = parse_utc(entitlement["granted_at"])
+        revoked = parse_utc(entitlement["revoked_at"])
+        if granted is None or granted > cutoff:
+            continue
+        request = requests.get(entitlement["request_id"] or "")
+        approvals = approvals_by_request.get(entitlement["request_id"] or "", [])
+        matching_request = (
+            request is not None and request["account_id"] == entitlement["account_id"]
+            and request["role_id"] == entitlement["role_id"]
+            and parse_utc(request["submitted_at"]) is not None
+            and parse_utc(request["submitted_at"]) <= granted
+        )
+        valid = any(
+            matching_request and approval["decision"] == "APPROVED"
+            and parse_utc(approval["decided_at"]) is not None
+            and parse_utc(approval["decided_at"]) <= granted
+            and (approval["valid_until"] is None
+                 or parse_utc(approval["valid_until"]) >= granted)
+            for approval in approvals
+        )
+        if not valid:
+            findings.append(_finding(
+                "CT-02", "privileged_approval_missing", "高权限缺少有效事前审批",
+                "exception", "high", account["system_id"], entitlement["granted_at"],
+                "entitlement", entitlement["entitlement_id"],
+                "高权限授予前未找到同账号同角色的有效批准。",
+                f"权限 {entitlement['entitlement_id']} 于 {entitlement['granted_at']} 授予；"
+                f"关联申请 {entitlement['request_id'] or '空'}；符合口径的事前审批不存在。",
+                [("accounts", account), ("roles", role), ("entitlements", entitlement),
+                 ("access_requests", request)]
+                + [("access_approvals", approval) for approval in approvals],
+            ))
+        dated_reviews = [
+            review for review in reviews_by_entitlement.get(entitlement["entitlement_id"], [])
+            if parse_utc(review["due_at"]) is not None
+            and parse_utc(review["due_at"]) <= cutoff
+            and (revoked is None or revoked > parse_utc(review["due_at"]))
+            and granted <= parse_utc(review["due_at"])
+        ]
+        if not reviews_by_entitlement.get(entitlement["entitlement_id"]) and (
+            revoked is None or revoked > cutoff
+        ):
+            findings.append(_finding(
+                "CT-02", "privileged_review_evidence_missing", "高权限周期复核记录缺失",
+                "manual_review", "medium", account["system_id"],
+                entitlement["granted_at"], "entitlement", entitlement["entitlement_id"],
+                "未抽取到该高权限的周期复核记录，需核对复核范围和期限。",
+                f"权限 {entitlement['entitlement_id']} 在审计截止日仍有效，"
+                "但权限复核抽取中没有关联记录；不能仅凭空值判断是否逾期。",
+                [("accounts", account), ("roles", role), ("entitlements", entitlement)],
+            ))
+        for review in dated_reviews:
+            due = parse_utc(review["due_at"])
+            completed = parse_utc(review["completed_at"])
+            assert due is not None
+            if completed is None or completed > due:
+                findings.append(_finding(
+                    "CT-02", "privileged_review_overdue", "高权限复核逾期",
+                    "exception", "medium", account["system_id"], review["due_at"],
+                    "entitlement", entitlement["entitlement_id"],
+                    "高权限复核未在记录的截止时间内完成。",
+                    f"复核 {review['review_id']} 期限为 {review['due_at']}；"
+                    f"完成时间为 {review['completed_at'] or '空'}。",
+                    [("accounts", account), ("roles", role),
+                     ("entitlements", entitlement), ("access_reviews", review)],
+                ))
+
+    # CT-03: a clear same-identity conflict on approved sensitive requests.
+    for request in data["access_requests"]:
+        submitted = parse_utc(request["submitted_at"])
+        if submitted is None or submitted > cutoff:
+            continue
+        sensitive_permissions = [
+            row for row in permissions_by_role.get(request["role_id"], []) if row["is_sensitive"]
+        ]
+        if not sensitive_permissions:
+            continue
+        account = accounts_by_id.get(request["account_id"])
+        for approval in approvals_by_request.get(request["request_id"], []):
+            if approval["decision"] != "APPROVED":
+                continue
+            decided = parse_utc(approval["decided_at"])
+            if decided is None or decided > cutoff:
+                continue
+            if request["requester_id"] != approval["approver_id"]:
+                continue
+            findings.append(_finding(
+                "CT-03", "sensitive_self_approval", "敏感权限由申请人自行批准",
+                "exception", "high", account["system_id"] if account else "UNKNOWN",
+                approval["decided_at"] or request["submitted_at"],
+                "access_request", request["request_id"],
+                "同一员工ID出现在敏感权限申请人与批准人字段。",
+                f"申请 {request['request_id']} 的申请人和审批人均为 "
+                f"{request['requester_id']}；审批记录 {approval['approval_id']} "
+                "状态为APPROVED。",
+                [("access_requests", request), ("access_approvals", approval),
+                 ("accounts", account)]
+                + [("role_permissions", permission) for permission in sensitive_permissions],
+            ))
+
+    # CT-04: standard changes only; emergency deployments use CT-05.
+    for deployment in data["deployments"]:
+        if deployment["deployment_type"] == "EMERGENCY":
+            continue
+        deployed = parse_utc(deployment["deployed_at"])
+        if deployed is None or deployed > cutoff:
+            continue
+        ticket = tickets.get(deployment["ticket_id"] or "")
+        commit = commits.get(deployment["commit_id"])
+        base_evidence = [("deployments", deployment), ("code_commits", commit)]
+        if ticket is None:
+            findings.append(_finding(
+                "CT-04", "deployment_ticket_missing", "生产部署缺少关联工单",
+                "exception", "high", deployment["system_id"], deployment["deployed_at"],
+                "deployment", deployment["deployment_id"],
+                "标准生产部署未找到关联变更工单。",
+                f"部署 {deployment['deployment_id']} 的工单ID为 "
+                f"{deployment['ticket_id'] or '空'}，在工单抽取中无匹配记录。",
+                base_evidence,
+            ))
+            continue
+        evidence = base_evidence + [("change_tickets", ticket)]
+        if ticket["system_id"] != deployment["system_id"]:
+            findings.append(_finding(
+                "CT-04", "deployment_ticket_system_mismatch", "工单与部署系统不一致",
+                "exception", "high", deployment["system_id"], deployment["deployed_at"],
+                "deployment", deployment["deployment_id"],
+                "关联工单不属于部署的系统。",
+                f"部署系统为 {deployment['system_id']}，工单系统为 {ticket['system_id']}。",
+                evidence,
+            ))
+            continue
+        for field, unknown_issue, late_issue, label in [
+            ("approved_at", "deployment_approval_unknown", "deployment_approval_late", "审批"),
+            ("tested_at", "deployment_test_unknown", "deployment_test_late", "测试"),
+        ]:
+            recorded = parse_utc(ticket[field])
+            if recorded is None:
+                findings.append(_finding(
+                    "CT-04", unknown_issue, f"变更{label}证据缺失",
+                    "manual_review", "medium", deployment["system_id"],
+                    deployment["deployed_at"], "deployment", deployment["deployment_id"],
+                    f"工单未提供{label}时间，需核对源系统。",
+                    f"工单 {ticket['ticket_id']} 的 {field} 为空；部署发生在 "
+                    f"{deployment['deployed_at']}。空值本身尚不能证明{label}未发生。",
+                    evidence,
+                ))
+            elif recorded > deployed:
+                findings.append(_finding(
+                    "CT-04", late_issue, f"变更{label}晚于生产部署",
+                    "exception", "high", deployment["system_id"],
+                    deployment["deployed_at"], "deployment", deployment["deployment_id"],
+                    f"工单记录的{label}时间晚于部署时间。",
+                    f"工单 {ticket['ticket_id']} 的 {field} 为 {ticket[field]}；"
+                    f"部署 {deployment['deployment_id']} 时间为 {deployment['deployed_at']}。",
+                    evidence,
+                ))
+
+    # CT-05: a deadline is measured from the deployment, not declaration time.
+    for deployment in data["deployments"]:
+        if deployment["deployment_type"] != "EMERGENCY":
+            continue
+        deployed = parse_utc(deployment["deployed_at"])
+        if deployed is None or deployed > cutoff:
+            continue
+        due = deployed + timedelta(hours=24)
+        emergency = emergency_by_deployment.get(deployment["deployment_id"])
+        ticket = tickets.get(deployment["ticket_id"] or "")
+        commit = commits.get(deployment["commit_id"])
+        evidence = [("deployments", deployment), ("change_tickets", ticket),
+                    ("code_commits", commit), ("emergency_changes", emergency)]
+        approved = parse_utc(emergency["retrospective_approved_at"]) if emergency else None
+        if approved is not None and approved > cutoff:
+            approved = None
+        if emergency is None:
+            findings.append(_finding(
+                "CT-05", "emergency_record_unknown", "应急变更记录缺失",
+                "manual_review", "medium", deployment["system_id"],
+                deployment["deployed_at"], "deployment", deployment["deployment_id"],
+                "部署标记为应急，但未抽取到应急变更记录。",
+                f"部署 {deployment['deployment_id']} 标记EMERGENCY；补批期限 "
+                f"{due.isoformat().replace('+00:00', 'Z')}，需核对抽取范围。",
+                evidence,
+            ))
+        elif approved is None:
+            if cutoff > due:
+                findings.append(_finding(
+                    "CT-05", "emergency_approval_overdue", "应急变更补批逾期",
+                    "exception", "high", deployment["system_id"],
+                    deployment["deployed_at"], "deployment", deployment["deployment_id"],
+                    "24小时补批期限已过，未见补批记录。",
+                    f"部署 {deployment['deployment_id']} 时间为 {deployment['deployed_at']}；"
+                    f"期限 {due.isoformat().replace('+00:00', 'Z')}；"
+                    f"应急记录 {emergency['emergency_id']} 补批时间为空。",
+                    evidence,
+                ))
+            else:
+                findings.append(_finding(
+                    "CT-05", "emergency_window_open", "应急补批窗口尚未届满",
+                    "manual_review", "low", deployment["system_id"],
+                    deployment["deployed_at"], "deployment", deployment["deployment_id"],
+                    "截止日时24小时补批窗口仍开放。",
+                    f"部署 {deployment['deployment_id']} 时间为 {deployment['deployed_at']}；"
+                    f"期限 {due.isoformat().replace('+00:00', 'Z')}；"
+                    f"审计截止为 {DEMO_CUTOFF}。后续须跟踪。",
+                    evidence,
+                ))
+        elif approved > due:
+            findings.append(_finding(
+                "CT-05", "emergency_approval_overdue", "应急变更补批逾期",
+                "exception", "high", deployment["system_id"],
+                deployment["deployed_at"], "deployment", deployment["deployment_id"],
+                "补批记录时间晚于24小时期限。",
+                f"补批时间 {emergency['retrospective_approved_at']} 晚于期限 "
+                f"{due.isoformat().replace('+00:00', 'Z')}。",
+                evidence,
+            ))
+        elif not emergency["retrospective_approver_id"]:
+            findings.append(_finding(
+                "CT-05", "emergency_approver_unknown", "应急补批人缺失",
+                "manual_review", "medium", deployment["system_id"],
+                deployment["deployed_at"], "deployment", deployment["deployment_id"],
+                "补批时间存在，但补批人字段缺失。",
+                f"应急记录 {emergency['emergency_id']} 无补批人ID，需核对审批原件。",
+                evidence,
+            ))
+
+    findings.sort(key=lambda item: (item["control_id"], item["occurred_at"],
+                                    item["entity_id"], item["issue_code"]))
+    return findings
+
+
+def run_tests(path: str) -> list[dict[str, Any]]:
+    """Run tests against a DuckDB file and persist candidates, preserving reviews."""
+    from controltrace.store import run_tests as persist_run_tests
+
+    return persist_run_tests(path)
