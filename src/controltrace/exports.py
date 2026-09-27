@@ -106,29 +106,33 @@ def finding_workpaper(finding: dict[str, Any], dataset_sha256: str) -> str:
         lines.append(f"- `{_json(event)}`")
     lines += ["", "## Linked source records", ""]
     for record in finding.get("related_records", []):
-        lines += ["```json", _json(record), "```", ""]
+        lines += ["    " + _json(record), ""]
     lines += [
         "## Human review",
         "",
-        f"- Reviewer: {review.get('reviewer') or 'Not reviewed'}",
-        f"- Reviewed at: {review.get('reviewed_at') or 'Not reviewed'}",
-        f"- Status: {review.get('status') or 'pending'}",
-        f"- Conclusion: {review.get('conclusion') or 'pending'}",
-        f"- Notes: {review.get('notes') or 'None'}",
+        "    " + _json({
+            "reviewer": review.get("reviewer"),
+            "reviewed_at": review.get("reviewed_at"),
+            "status": review.get("status", "pending"),
+            "conclusion": review.get("conclusion"),
+            "notes": review.get("notes"),
+        }),
         "",
         "### Review history",
         "",
     ]
     for item in finding.get("review_history", []):
-        lines.append(f"- `{_json(item)}`")
+        lines.append("    " + _json(item))
     lines += [
         "",
         "## Reproduction",
         "",
-        "From the project root: `uv run controltrace generate`, then "
-        "`uv run controltrace test`. Match the finding ID and source IDs above "
-        "against `source_tables/` in this bundle. The exported data is the exact "
-        "synthetic input snapshot; the generation seed and cutoff are in `manifest.json`.",
+        "From the project root, run `uv run controltrace verify --bundle workpapers.zip` "
+        "to check file hashes and replay the current rules against `source_tables/*.json`. "
+        "Match the finding ID and source IDs above to the JSON rows. To regenerate the "
+        "synthetic dataset separately, run `uv run controltrace generate` and then "
+        "`uv run controltrace test`. CSV files are protected against spreadsheet formulas; "
+        "the generation seed and cutoff are in `manifest.json`.",
         "",
         "An automated observation is a review candidate. The reviewer is responsible for "
         "assessing evidence completeness and documenting the final conclusion.",
@@ -139,19 +143,44 @@ def finding_workpaper(finding: dict[str, Any], dataset_sha256: str) -> str:
 
 def workpaper_zip(db_path: str | Path, finding_ids: set[str] | None = None) -> bytes:
     """Export source data, rule basis, result list and individual workpapers."""
-    findings = list_findings(db_path)
+    all_findings = list_findings(db_path)
+    findings = all_findings
     if finding_ids is not None:
-        findings = [finding for finding in findings if finding["finding_id"] in finding_ids]
+        unknown_ids = finding_ids - {finding["finding_id"] for finding in all_findings}
+        if unknown_ids:
+            raise ValueError(f"Unknown finding IDs: {', '.join(sorted(unknown_ids))}")
+        findings = [finding for finding in all_findings if finding["finding_id"] in finding_ids]
     source_files: dict[str, bytes] = {}
     source_hashes: dict[str, str] = {}
     for table in SOURCE_TABLES:
         rows = get_table_rows(db_path, table)
-        content = _csv_bytes(rows)
-        name = f"source_tables/{table}.csv"
-        source_files[name] = content
-        source_hashes[name] = hashlib.sha256(content).hexdigest()
+        for suffix, content in (
+            ("csv", _csv_bytes(rows)),
+            ("json", _json(rows).encode("utf-8")),
+        ):
+            name = f"source_tables/{table}.{suffix}"
+            source_files[name] = content
+            source_hashes[name] = hashlib.sha256(content).hexdigest()
     fingerprint = hashlib.sha256(_json(source_hashes).encode("utf-8")).hexdigest()
     meta = {row["key"]: row["value"] for row in get_table_rows(db_path, "meta")}
+    members = {
+        **source_files,
+        "findings.csv": exception_csv(findings),
+        "rules.json": _json(RULES).encode("utf-8"),
+        "README.txt": (
+            "Synthetic ControlTrace workpapers. Check manifest.json hashes before using "
+            "source_tables/*.json for exact source values. CSV copies protect against "
+            "spreadsheet formulas. Review decisions are separate from the automated test. "
+            "Run `uv run controltrace verify --bundle workpapers.zip` to replay the rules "
+            "against this source snapshot.\n"
+        ).encode("utf-8"),
+    }
+    members.update({
+        f"workpapers/{finding['finding_id']}.md": finding_workpaper(finding, fingerprint).encode(
+            "utf-8"
+        )
+        for finding in findings
+    })
     manifest = {
         "notice": "Synthetic case study; no real enterprise audit data",
         "audit_cutoff": DEMO_CUTOFF,
@@ -160,25 +189,16 @@ def workpaper_zip(db_path: str | Path, finding_ids: set[str] | None = None) -> b
         "generated_at_utc": datetime.now(timezone.utc).isoformat(),
         "source_sha256": source_hashes,
         "dataset_sha256": fingerprint,
+        "files_sha256": {
+            name: hashlib.sha256(content).hexdigest() for name, content in members.items()
+        },
+        "export_scope": "all" if finding_ids is None else "selected",
+        "all_finding_ids": [finding["finding_id"] for finding in all_findings],
         "finding_ids": [finding["finding_id"] for finding in findings],
     }
     bundle = io.BytesIO()
     with zipfile.ZipFile(bundle, "w", zipfile.ZIP_DEFLATED) as archive:
-        for name, content in source_files.items():
+        for name, content in members.items():
             archive.writestr(name, content)
         archive.writestr("manifest.json", _json(manifest))
-        archive.writestr("findings.csv", exception_csv(findings))
-        archive.writestr("rules.json", _json(RULES))
-        archive.writestr(
-            "README.txt",
-            "Synthetic ControlTrace workpapers. Check manifest.json hashes before using "
-            "source_tables/*.csv. Review decisions are separate from the automated test. "
-            "Run `uv run controltrace generate` and `uv run controltrace test` in the project "
-            "to reproduce automated observations with the fixed seed and audit cutoff.\n",
-        )
-        for finding in findings:
-            archive.writestr(
-                f"workpapers/{finding['finding_id']}.md",
-                finding_workpaper(finding, fingerprint),
-            )
     return bundle.getvalue()

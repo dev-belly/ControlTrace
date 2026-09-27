@@ -266,12 +266,23 @@ def save_review(
         raise ValueError(f"Status must be one of {REVIEW_STATUSES}")
     if conclusion is not None and conclusion not in REVIEW_CONCLUSIONS:
         raise ValueError(f"Conclusion must be one of {REVIEW_CONCLUSIONS}")
-    if status == "closed" and conclusion is None:
-        raise ValueError("A closed review requires a conclusion")
+    if status == "pending" and conclusion is not None:
+        raise ValueError("A pending review cannot have a conclusion")
+    if status == "in_review" and conclusion not in (None, "needs_more_evidence"):
+        raise ValueError("An in-progress review cannot have a final conclusion")
+    if status == "closed" and conclusion not in ("confirmed_exception", "false_positive"):
+        raise ValueError("A closed review requires a final conclusion")
+    if status == "closed" and not notes.strip():
+        raise ValueError("A closed review requires notes explaining the conclusion")
     if reviewed_at is None:
         reviewed_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-    if parse_utc(reviewed_at) is None:
+    try:
+        reviewed_time = parse_utc(reviewed_at)
+    except (TypeError, ValueError) as error:
+        raise ValueError("reviewed_at must be an ISO-8601 timestamp") from error
+    if reviewed_time is None:
         raise ValueError("reviewed_at must be an ISO-8601 timestamp")
+    reviewed_at = reviewed_time.isoformat().replace("+00:00", "Z")
     con = _connect(path)
     try:
         if con.execute(

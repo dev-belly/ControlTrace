@@ -48,3 +48,28 @@ def test_review_is_append_only_and_rejects_unknown_finding(tmp_path):
     assert finding["latest_review"]["reviewer"] == "Analyst B"
     with pytest.raises(ValueError, match="Unknown finding"):
         save_review(db_path, "F-NO-SUCH-CASE", "Analyst C")
+
+
+def test_review_state_and_timezone_preserve_an_unambiguous_latest_decision(tmp_path):
+    db_path = tmp_path / "case.duckdb"
+    initialize_db(db_path)
+    finding_id = run_tests(db_path)[0]["finding_id"]
+    with pytest.raises(ValueError, match="pending review cannot have a conclusion"):
+        save_review(db_path, finding_id, "Analyst", "pending", "confirmed_exception")
+    with pytest.raises(ValueError, match="in-progress review cannot have a final conclusion"):
+        save_review(db_path, finding_id, "Analyst", "in_review", "false_positive")
+    with pytest.raises(ValueError, match="closed review requires a final conclusion"):
+        save_review(db_path, finding_id, "Analyst", "closed", "needs_more_evidence")
+    with pytest.raises(ValueError, match="closed review requires notes"):
+        save_review(db_path, finding_id, "Analyst", "closed", "false_positive")
+    first = save_review(
+        db_path, finding_id, "Analyst A", "in_review", "needs_more_evidence",
+        "Checking approval", "2026-09-27T18:00:00+08:00",
+    )
+    second = save_review(
+        db_path, finding_id, "Analyst B", "closed", "confirmed_exception",
+        "Approval is later than deployment", "2026-09-27T11:00:00Z",
+    )
+    assert first["reviewed_at"] == "2026-09-27T10:00:00Z"
+    assert get_table_rows(db_path, "reviews") == [first, second]
+    assert list_findings(db_path)[0]["latest_review"] == second

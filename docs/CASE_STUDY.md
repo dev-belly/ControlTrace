@@ -47,12 +47,13 @@ CT-04 要求标准生产部署有同系统变更工单，且审批、测试完�
 
 ## 5. 导出与复现
 
-本次实际导出的[单条 Markdown 底稿](EXAMPLE_WORKPAPER.md)保留了规则目标、输入字段、判断逻辑、限制、完整来源行、时间线及示范复核记录。程序导出的 `workpapers.zip` 还包含全部合成源表 CSV、`rules.json`、`findings.csv` 和 `manifest.json`；清单记录每张源表的 SHA-256 以及总数据指纹。
+本次实际导出的[单条 Markdown 底稿](EXAMPLE_WORKPAPER.md)保留了规则目标、输入字段、判断逻辑、限制、完整来源行、时间线及示范复核记录。程序导出的 `workpapers.zip` 还包含全部合成源表的原值 JSON 和便于表格查看的 CSV、`rules.json`、`findings.csv` 和 `manifest.json`；清单记录每个文件的 SHA-256 以及总数据指纹。
 
 ```bash
 uv run controltrace demo
 # 在页面选择该发现并记录自己的复核后，或在另一终端执行：
 uv run controltrace export
+uv run controltrace verify --bundle exports/workpapers.zip
 ```
 
-在新安装环境中，固定种子会复现同一条自动发现及其来源 ID；**人工复核不会预置**，应由使用者在界面自行记录。可将导出的 `source_tables/deployments.csv`、`code_commits.csv` 和 `change_tickets.csv` 的对应 ID 与底稿逐字段核对，再比较 `approved_at`、`tested_at` 和 `deployed_at`。`expected_results` 只是合成案例的测试答案，不参与规则计算。
+在新安装环境中，固定种子会复现同一条自动发现及其来源 ID；**人工复核不会预置**，应由使用者在界面自行记录。`verify` 会校验包内文件并以 JSON 原值重放当前规则；也可将导出的 `source_tables/deployments.json`、`code_commits.json` 和 `change_tickets.json` 对应 ID 与底稿逐字段核对，再比较 `approved_at`、`tested_at`、`committed_at` 和 `deployed_at`。重放须使用与底稿一致的规则版本；`expected_results` 只是合成案例的测试答案，不参与规则计算。

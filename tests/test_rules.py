@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from copy import deepcopy
 
-from controltrace.data import generate_demo_data
+import pytest
+
+from controltrace.data import generate_demo_data, parse_utc
 from controltrace.rules import evaluate
 
 
@@ -118,6 +120,31 @@ def test_missing_entitlement_role_or_account_is_not_silently_skipped():
     assert not _has(findings, "privileged_approval_missing", "EN005")
 
 
+def test_missing_role_owner_department_needs_transfer_review():
+    data = deepcopy(generate_demo_data())
+    _record(data, "roles", "role_id", "R_FIN")["owner_department"] = None
+    findings = evaluate(data)
+    item = next(
+        finding for finding in findings
+        if finding["issue_code"] == "transfer_role_department_unknown"
+        and finding["entity_id"] == "EN003"
+    )
+    assert item["classification"] == "manual_review"
+    assert "roles:R_FIN" in item["evidence_ids"]
+    assert not _has(findings, "transfer_old_role_retained", "EN003")
+
+
+def test_privileged_approval_cannot_precede_request_and_blank_expiry_is_missing():
+    data = deepcopy(generate_demo_data())
+    _record(data, "access_approvals", "approval_id", "AP006")["decided_at"] = (
+        "2025-06-01T09:00:00Z"
+    )
+    _record(data, "access_approvals", "approval_id", "AP014")["valid_until"] = " "
+    findings = evaluate(data)
+    assert _has(findings, "privileged_approval_missing", "EN006")
+    assert not _has(findings, "privileged_approval_missing", "EN014")
+
+
 def test_missing_or_mismatched_commit_is_an_explicit_evidence_gap():
     data = deepcopy(generate_demo_data())
     data["code_commits"] = [
@@ -159,3 +186,154 @@ def test_revoked_privilege_still_requires_original_approval():
     findings = evaluate(data)
     assert _has(findings, "privileged_approval_missing", "EN005")
     assert not _has(findings, "privileged_review_overdue", "EN005")
+
+
+def test_unresolved_deadline_equal_to_audit_cutoff_is_due():
+    data = deepcopy(generate_demo_data())
+    _record(data, "hr_events", "event_id", "TERM-001")["event_at"] = (
+        "2025-06-28T23:59:59Z"
+    )
+    _record(data, "hr_events", "event_id", "MOVE-003")["event_at"] = (
+        "2025-06-25T23:59:59Z"
+    )
+    _record(data, "deployments", "deployment_id", "D005")["deployed_at"] = (
+        "2025-06-29T23:59:59Z"
+    )
+    findings = evaluate(data)
+    assert _has(findings, "terminated_account_open", "A001")
+    assert _has(findings, "transfer_old_role_retained", "EN003")
+    assert _has(findings, "emergency_approval_overdue", "D005")
+    assert not _has(findings, "emergency_window_open", "D005")
+
+
+def test_repeated_source_events_have_unique_stable_finding_ids():
+    data = deepcopy(generate_demo_data())
+    second_transfer = deepcopy(_record(data, "hr_events", "event_id", "MOVE-003"))
+    second_transfer.update(event_id="MOVE-003-B", event_at="2025-06-02T09:00:00Z")
+    data["hr_events"].append(second_transfer)
+    second_review = deepcopy(_record(data, "access_reviews", "review_id", "RV006"))
+    second_review.update(review_id="RV006-B", due_at="2025-06-16T23:59:00Z")
+    data["access_reviews"].append(second_review)
+    second_approval = deepcopy(_record(data, "access_approvals", "approval_id", "AP007"))
+    second_approval["approval_id"] = "AP007-B"
+    data["access_approvals"].append(second_approval)
+
+    first = evaluate(data)
+    assert len({item["finding_id"] for item in first}) == len(first)
+    for issue_code, entity_id in [
+        ("transfer_old_role_retained", "EN003"),
+        ("privileged_review_overdue", "EN006"),
+        ("sensitive_self_approval", "Q007"),
+    ]:
+        assert sum(
+            item["issue_code"] == issue_code and item["entity_id"] == entity_id
+            for item in first
+        ) == 2
+
+    data["hr_events"].reverse()
+    data["access_reviews"].reverse()
+    data["access_approvals"].reverse()
+    second = evaluate(data)
+    ids_by_evidence = lambda rows: {  # noqa: E731 - concise snapshot of a stable key
+        tuple(sorted(item["evidence_ids"])): item["finding_id"] for item in rows
+    }
+    assert ids_by_evidence(first) == ids_by_evidence(second)
+
+
+def test_missing_sensitivity_mapping_and_unknown_deployment_type_need_review():
+    data = deepcopy(generate_demo_data())
+    data["role_permissions"] = [
+        item for item in data["role_permissions"] if item["role_id"] != "R_PAYMENT"
+    ]
+    _record(data, "deployments", "deployment_id", "D004")["deployment_type"] = "OTHER"
+    findings = evaluate(data)
+    for issue_code, entity_id in [
+        ("request_sensitivity_mapping_missing", "Q007"),
+        ("deployment_type_unknown", "D004"),
+    ]:
+        item = next(
+            finding for finding in findings
+            if finding["issue_code"] == issue_code and finding["entity_id"] == entity_id
+        )
+        assert item["classification"] == "manual_review"
+    assert not _has(findings, "sensitive_self_approval", "Q007")
+
+
+def test_commit_recorded_after_deployment_is_flagged():
+    data = deepcopy(generate_demo_data())
+    _record(data, "code_commits", "commit_id", "C004")["committed_at"] = (
+        "2025-06-21T11:00:00Z"
+    )
+    findings = evaluate(data)
+    finding = next(
+        item for item in findings
+        if item["issue_code"] == "deployment_commit_late" and item["entity_id"] == "D004"
+    )
+    assert finding["classification"] == "exception"
+    assert "code_commits:C004" in finding["evidence_ids"]
+
+
+def test_multiple_emergency_records_use_any_complete_approval_within_deadline():
+    data = deepcopy(generate_demo_data())
+    late = deepcopy(_record(data, "emergency_changes", "emergency_id", "EM006"))
+    late.update(
+        emergency_id="EM006-B", retrospective_approved_at="2025-06-25T12:00:00Z"
+    )
+    data["emergency_changes"].append(late)
+    on_time = deepcopy(_record(data, "emergency_changes", "emergency_id", "EM005"))
+    on_time.update(
+        emergency_id="EM005-B", retrospective_approver_id="P014",
+        retrospective_approved_at="2025-06-21T09:00:00Z",
+    )
+    data["emergency_changes"].append(on_time)
+    for rows in (data["emergency_changes"], list(reversed(data["emergency_changes"]))):
+        data["emergency_changes"] = rows
+        findings = evaluate(data)
+        assert not _has(findings, "emergency_approval_overdue", "D005")
+        assert not _has(findings, "emergency_approval_overdue", "D006")
+
+
+def test_emergency_approval_timestamp_without_approver_needs_review():
+    data = deepcopy(generate_demo_data())
+    _record(data, "emergency_changes", "emergency_id", "EM005")[
+        "retrospective_approved_at"
+    ] = "2025-06-21T09:00:00Z"
+    findings = evaluate(data)
+    assert _has(findings, "emergency_approver_unknown", "D005")
+    assert not _has(findings, "emergency_approval_overdue", "D005")
+
+
+def test_emergency_approval_must_match_ticket_and_follow_deployment():
+    data = deepcopy(generate_demo_data())
+    _record(data, "emergency_changes", "emergency_id", "EM006")["ticket_id"] = "CH005"
+    findings = evaluate(data)
+    mismatch = next(
+        item for item in findings
+        if item["issue_code"] == "emergency_ticket_mismatch" and item["entity_id"] == "D006"
+    )
+    assert mismatch["classification"] == "manual_review"
+    assert not _has(findings, "emergency_approval_overdue", "D006")
+
+    _record(data, "emergency_changes", "emergency_id", "EM006").update(
+        ticket_id="CH006", retrospective_approved_at="2025-06-24T08:00:00Z"
+    )
+    findings = evaluate(data)
+    assert _has(findings, "emergency_approval_before_deployment", "D006")
+    assert not _has(findings, "emergency_approval_overdue", "D006")
+
+
+def test_blank_optional_timestamps_are_missing_evidence():
+    data = deepcopy(generate_demo_data())
+    _record(data, "accounts", "account_id", "A001")["disabled_at"] = " "
+    _record(data, "change_tickets", "ticket_id", "CH003")["tested_at"] = ""
+    _record(data, "emergency_changes", "emergency_id", "EM005")[
+        "retrospective_approved_at"
+    ] = "  "
+    findings = evaluate(data)
+    assert parse_utc("  ") is None
+    assert parse_utc(" 2025-06-20T09:00:00Z ") == parse_utc("2025-06-20T09:00:00Z")
+    with pytest.raises(ValueError):
+        parse_utc("invalid timestamp")
+    assert _has(findings, "terminated_account_open", "A001")
+    assert _has(findings, "deployment_test_unknown", "D003")
+    assert _has(findings, "emergency_approval_overdue", "D005")

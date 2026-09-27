@@ -21,11 +21,29 @@ def build_parser() -> argparse.ArgumentParser:
             command.add_argument("--headless", action="store_true")
         if name == "export":
             command.add_argument("--out", type=Path, default=Path("exports"))
+    verify = subcommands.add_parser("verify")
+    verify.add_argument("--bundle", type=Path, default=Path("exports/workpapers.zip"))
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.command == "verify":
+        import zipfile
+
+        from controltrace.verify import verify_bundle
+
+        try:
+            result = verify_bundle(args.bundle)
+        except (ValueError, KeyError, TypeError, zipfile.BadZipFile, FileNotFoundError) as error:
+            print(f"Bundle verification failed: {error}", file=sys.stderr)
+            return 1
+        print(
+            f"Verified {result['source_files_verified']} source files and replayed "
+            f"{result['replayed_findings']} observations "
+            f"({result['exported_findings']} in this {result['scope']} export)."
+        )
+        return 0
     from controltrace.rules import run_tests
     from controltrace.store import initialize_db
 
@@ -43,12 +61,12 @@ def main(argv: list[str] | None = None) -> int:
         )
     if args.command == "export":
         from controltrace.exports import exception_csv, workpaper_zip
-        from controltrace.store import list_findings
 
+        findings = run_tests(db_path)
         args.out.mkdir(parents=True, exist_ok=True)
         csv_path = args.out / "exceptions.csv"
         zip_path = args.out / "workpapers.zip"
-        csv_path.write_bytes(exception_csv(list_findings(db_path)))
+        csv_path.write_bytes(exception_csv(findings))
         zip_path.write_bytes(workpaper_zip(db_path))
         print(f"Exported {csv_path} and {zip_path}")
     if args.command == "demo":

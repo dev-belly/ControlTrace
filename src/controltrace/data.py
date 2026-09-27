@@ -408,7 +408,7 @@ def generate_demo_data(seed: int = DEFAULT_SEED) -> dict[str, list[dict]]:
 
 def parse_utc(value: str | None) -> datetime | None:
     """Parse a fixture timestamp as an aware UTC datetime."""
-    if value is None:
+    if value is None or not value.strip():
         return None
-    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
     return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed.astimezone(timezone.utc)

@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import os
 from collections import Counter
+from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
 import streamlit as st
 
+from controltrace import __version__
 from controltrace.exports import exception_csv, workpaper_zip
 from controltrace.rules import RULES, run_tests
 from controltrace.store import (
@@ -164,10 +166,11 @@ selection = st.dataframe(
     use_container_width=True,
     on_select="rerun",
     selection_mode="single-row",
-    key="finding_table",
+    key="finding_table_"
+    + sha256("|".join(item["finding_id"] for item in filtered).encode()).hexdigest()[:12],
 )
 selected_rows = selection.selection.rows
-if selected_rows:
+if selected_rows and 0 <= selected_rows[0] < len(filtered):
     st.session_state["selected_finding_id"] = filtered[selected_rows[0]]["finding_id"]
 selected_id = st.session_state.get("selected_finding_id")
 selected = next((item for item in filtered if item["finding_id"] == selected_id), filtered[0])
@@ -242,28 +245,52 @@ with right:
         f"Current: {current.get('status', 'pending')} · "
         f"{current.get('conclusion') or 'no conclusion'}"
     )
-    with st.form(f"review_{selected['finding_id']}"):
-        reviewer = st.text_input("Reviewer name or initials", value=current.get("reviewer", ""))
-        status_options = ["pending", "in_review", "closed"]
-        conclusion_options = ["needs_more_evidence", "confirmed_exception", "false_positive"]
-        status = st.selectbox(
-            "Processing status",
-            status_options,
-            index=status_options.index(current.get("status", "pending")),
-        )
-        conclusion = st.selectbox(
-            "Review conclusion",
-            conclusion_options,
-            index=conclusion_options.index(current.get("conclusion", "needs_more_evidence")),
-        )
-        notes = st.text_area("Review notes / exception basis", value=current.get("notes", ""))
-        submitted = st.form_submit_button("Save review", type="primary", use_container_width=True)
+    finding_id = selected["finding_id"]
+    reviewer = st.text_input(
+        "Reviewer name or initials",
+        value=current.get("reviewer", ""),
+        key=f"reviewer_{finding_id}",
+    )
+    status_options = ["pending", "in_review", "closed"]
+    status = st.selectbox(
+        "Processing status",
+        status_options,
+        index=status_options.index(current.get("status", "pending")),
+        key=f"review_status_{finding_id}",
+    )
+    conclusion_options = {
+        "pending": [None],
+        "in_review": [None, "needs_more_evidence"],
+        "closed": ["confirmed_exception", "false_positive"],
+    }[status]
+    current_conclusion = current.get("conclusion")
+    conclusion = st.selectbox(
+        "Review conclusion",
+        conclusion_options,
+        index=(
+            conclusion_options.index(current_conclusion)
+            if current_conclusion in conclusion_options
+            else 0
+        ),
+        format_func=lambda value: value.replace("_", " ") if value else "No conclusion",
+        key=f"review_conclusion_{finding_id}_{status}",
+    )
+    notes = st.text_area(
+        "Review notes / exception basis",
+        value=current.get("notes", ""),
+        key=f"review_notes_{finding_id}",
+    )
+    submitted = st.button("Save review", type="primary", use_container_width=True)
     if submitted:
         if not reviewer.strip() or not notes.strip():
             st.error("Reviewer and notes are required to preserve a usable review trail.")
         else:
-            save_review(DB_PATH, selected["finding_id"], reviewer.strip(), status, conclusion, notes.strip())
-            st.rerun()
+            try:
+                save_review(DB_PATH, finding_id, reviewer.strip(), status, conclusion, notes.strip())
+            except ValueError as error:
+                st.error(str(error))
+            else:
+                st.rerun()
     if selected.get("review_history"):
         with st.expander(f"Decision history ({len(selected['review_history'])})"):
             for review in selected["review_history"]:
@@ -271,6 +298,6 @@ with right:
 
 st.divider()
 st.caption(
-    "ControlTrace v0.1 · Synthetic evidence only · The rules highlight candidates for "
+    f"ControlTrace v{__version__} · Synthetic evidence only · The rules highlight candidates for "
     "professional review; source completeness and business context can change the conclusion."
 )
