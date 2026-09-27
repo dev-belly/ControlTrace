@@ -23,8 +23,8 @@ RULES: dict[str, dict[str, Any]] = {
             "roles.owner_department",
         ],
         "logic": "离职后48小时内停用账号；转岗后5×24小时内撤销原部门专属角色。所有时间均为UTC，等于期限视为按时。",
-        "exceptions": "共享角色（owner_department=GLOBAL）不视为原部门权限；来源缺少原部门时列为待人工判断。",
-        "limitations": "账号停用时间及角色归属来自模拟抽取；无法判断企业批准的延长期或系统外补偿控制。",
+        "exceptions": "共享角色（owner_department=GLOBAL）不视为原部门权限；来源缺少原部门或事件关联不到账号时列为待人工判断。",
+        "limitations": "账号停用时间及角色归属来自模拟抽取；关联不到账号不等于员工确实没有账号，也无法判断企业批准的延长期或系统外补偿控制。",
         "threshold": "offboarding=48 hours; transfer=5 days",
     },
     "CT-02": {
@@ -38,7 +38,7 @@ RULES: dict[str, dict[str, Any]] = {
         ],
         "logic": "批准必须关联同一账号和角色、决定为APPROVED，且决定时间不晚于授予、有效期不早于授予。复核完成时间不得晚于due_at。",
         "exceptions": "审批检查截止日前全部高权限授予；复核只检查到期时仍有效的授权。未到复核到期日不判逾期；有效授权无复核记录列为人工核实。职责冲突由CT-03单独检测。",
-        "limitations": "本测试依赖审批和复核导出完整性；缺少源记录是证据缺口，最终定性仍需核对原系统。",
+        "limitations": "本测试依赖账号、角色、审批和复核导出完整性；授权关联不到账号或角色是证据缺口，最终定性仍需核对原系统。",
         "threshold": "approval <= grant; review completion <= due_at",
     },
     "CT-03": {
@@ -61,9 +61,9 @@ RULES: dict[str, dict[str, Any]] = {
             "change_tickets.system_id/approved_at/tested_at",
             "code_commits.ticket_id/committed_at",
         ],
-        "logic": "标准部署须关联同系统工单，approved_at和tested_at不晚于deployed_at；缺失时间列为待人工判断。",
+        "logic": "标准部署须关联同系统工单，approved_at和tested_at不晚于deployed_at；提交记录缺失、提交关联工单不一致或缺失时间列为待人工判断。",
         "exceptions": "标记为EMERGENCY的部署适用CT-05补批控制，不按标准变更的事前审批/测试口径测试。",
-        "limitations": "时间戳证明记录顺序，不证明测试质量、审批独立性、代码内容或部署范围。",
+        "limitations": "时间戳证明记录顺序；提交记录缺失或关联工单不一致仅说明证据链需核实，不证明测试质量、审批独立性、代码内容或部署范围。",
         "threshold": "ticket exists; approval/test <= deployment",
     },
     "CT-05": {
@@ -198,9 +198,20 @@ def evaluate(data: dict[str, list[dict]]) -> list[dict[str, Any]]:
             due = event_at + timedelta(hours=48)
             if cutoff <= due:
                 continue
-            for account in accounts:
-                if account["employee_id"] != event["employee_id"]:
-                    continue
+            linked_accounts = [
+                account for account in accounts if account["employee_id"] == event["employee_id"]
+            ]
+            if not linked_accounts:
+                findings.append(_finding(
+                    "CT-01", "termination_account_extract_missing", "离职事件未关联到账号",
+                    "manual_review", "medium", "UNKNOWN", event["event_at"],
+                    "hr_event", event["event_id"],
+                    "账号抽取中未找到该离职员工的账号，需核实账号总体完整性。",
+                    f"离职事件 {event['event_id']} 对应员工 {event['employee_id']}；"
+                    "账号抽取中没有该员工记录，无法判断其是否曾有账号或是否按时停用。",
+                    [("hr_events", event)],
+                ))
+            for account in linked_accounts:
                 disabled = parse_utc(account["disabled_at"])
                 if disabled is None or disabled > due:
                     findings.append(_finding(
@@ -217,6 +228,19 @@ def evaluate(data: dict[str, list[dict]]) -> list[dict[str, Any]]:
             due = event_at + timedelta(days=5)
             if cutoff <= due:
                 continue
+            linked_accounts = [
+                account for account in accounts if account["employee_id"] == event["employee_id"]
+            ]
+            if not linked_accounts:
+                findings.append(_finding(
+                    "CT-01", "transfer_account_extract_missing", "转岗事件未关联到账号",
+                    "manual_review", "medium", "UNKNOWN", event["event_at"],
+                    "hr_event", event["event_id"],
+                    "账号抽取中未找到该转岗员工的账号，需核实旧权限总体完整性。",
+                    f"转岗事件 {event['event_id']} 对应员工 {event['employee_id']}；"
+                    "账号抽取中没有该员工记录，无法判断其是否有需撤销的旧权限。",
+                    [("hr_events", event)],
+                ))
             for entitlement in data["entitlements"]:
                 account = accounts_by_id.get(entitlement["account_id"])
                 role = roles.get(entitlement["role_id"])
@@ -257,14 +281,30 @@ def evaluate(data: dict[str, list[dict]]) -> list[dict[str, Any]]:
 
     # CT-02: test historical grant approvals and reviews due while access was active.
     for entitlement in data["entitlements"]:
-        role = roles.get(entitlement["role_id"])
-        account = accounts_by_id.get(entitlement["account_id"])
-        if not role or not account or not role["is_privileged"]:
-            continue
         granted = parse_utc(entitlement["granted_at"])
-        revoked = parse_utc(entitlement["revoked_at"])
         if granted is None or granted > cutoff:
             continue
+        role = roles.get(entitlement["role_id"])
+        account = accounts_by_id.get(entitlement["account_id"])
+        if role is None or account is None:
+            missing = "、".join(
+                label for record, label in ((account, "账号"), (role, "角色"))
+                if record is None
+            )
+            findings.append(_finding(
+                "CT-02", "entitlement_mapping_missing", "授权关联记录缺失",
+                "manual_review", "medium", account["system_id"] if account else "UNKNOWN",
+                entitlement["granted_at"], "entitlement", entitlement["entitlement_id"],
+                f"授权关联不到{missing}，无法完成高权限审批与复核测试。",
+                f"授权 {entitlement['entitlement_id']} 指向账号 "
+                f"{entitlement['account_id']} 和角色 {entitlement['role_id']}；"
+                f"抽取中缺少{missing}，需先核实来源总体和关联键。",
+                [("entitlements", entitlement), ("accounts", account), ("roles", role)],
+            ))
+            continue
+        if not role["is_privileged"]:
+            continue
+        revoked = parse_utc(entitlement["revoked_at"])
         request = requests.get(entitlement["request_id"] or "")
         approvals = approvals_by_request.get(entitlement["request_id"] or "", [])
         matching_request = (
@@ -393,6 +433,27 @@ def evaluate(data: dict[str, list[dict]]) -> list[dict[str, Any]]:
                 evidence,
             ))
             continue
+        if commit is None:
+            findings.append(_finding(
+                "CT-04", "deployment_commit_missing", "部署关联的代码提交缺失",
+                "manual_review", "medium", deployment["system_id"],
+                deployment["deployed_at"], "deployment", deployment["deployment_id"],
+                "部署所指向的代码提交未出现在抽取中，需核对部署证据链。",
+                f"部署 {deployment['deployment_id']} 指向提交 "
+                f"{deployment['commit_id'] or '空'}，但提交抽取中没有对应记录。",
+                evidence,
+            ))
+        elif commit["ticket_id"] != deployment["ticket_id"]:
+            findings.append(_finding(
+                "CT-04", "deployment_commit_ticket_mismatch", "提交与部署工单关联不一致",
+                "manual_review", "medium", deployment["system_id"],
+                deployment["deployed_at"], "deployment", deployment["deployment_id"],
+                "代码提交和部署指向不同工单，需核对变更证据链。",
+                f"部署 {deployment['deployment_id']} 的工单为 "
+                f"{deployment['ticket_id']}；提交 {commit['commit_id']} 的工单为 "
+                f"{commit['ticket_id'] or '空'}。",
+                evidence,
+            ))
         for field, unknown_issue, late_issue, label in [
             ("approved_at", "deployment_approval_unknown", "deployment_approval_late", "审批"),
             ("tested_at", "deployment_test_unknown", "deployment_test_late", "测试"),

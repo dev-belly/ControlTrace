@@ -80,6 +80,64 @@ def test_missing_evidence_requires_review_instead_of_a_false_conclusion():
     assert not _has(findings, "emergency_approval_overdue", "D005")
 
 
+def test_missing_hr_account_links_are_explicit_evidence_gaps():
+    data = deepcopy(generate_demo_data())
+    data["accounts"] = [
+        item for item in data["accounts"] if item["account_id"] not in {"A001", "A003"}
+    ]
+    findings = evaluate(data)
+    for issue_code, event_id in [
+        ("termination_account_extract_missing", "TERM-001"),
+        ("transfer_account_extract_missing", "MOVE-003"),
+    ]:
+        finding = next(
+            item for item in findings
+            if item["issue_code"] == issue_code and item["entity_id"] == event_id
+        )
+        assert finding["classification"] == "manual_review"
+        assert finding["evidence_ids"] == [f"hr_events:{event_id}"]
+    assert not _has(findings, "terminated_account_open", "A001")
+    assert not _has(findings, "transfer_old_role_retained", "EN003")
+
+
+def test_missing_entitlement_role_or_account_is_not_silently_skipped():
+    data = deepcopy(generate_demo_data())
+    data["roles"] = [item for item in data["roles"] if item["role_id"] != "R_ADMIN"]
+    data["accounts"] = [
+        item for item in data["accounts"] if item["account_id"] != "A003"
+    ]
+    findings = evaluate(data)
+    for entitlement_id in ("EN003", "EN005", "EN006", "EN014"):
+        finding = next(
+            item for item in findings
+            if item["issue_code"] == "entitlement_mapping_missing"
+            and item["entity_id"] == entitlement_id
+        )
+        assert finding["classification"] == "manual_review"
+        assert f"entitlements:{entitlement_id}" in finding["evidence_ids"]
+    assert not _has(findings, "privileged_approval_missing", "EN005")
+
+
+def test_missing_or_mismatched_commit_is_an_explicit_evidence_gap():
+    data = deepcopy(generate_demo_data())
+    data["code_commits"] = [
+        item for item in data["code_commits"] if item["commit_id"] != "C004"
+    ]
+    _record(data, "code_commits", "commit_id", "C003")["ticket_id"] = "CH004"
+    findings = evaluate(data)
+    for issue_code, deployment_id in [
+        ("deployment_commit_missing", "D004"),
+        ("deployment_commit_ticket_mismatch", "D003"),
+    ]:
+        finding = next(
+            item for item in findings
+            if item["issue_code"] == issue_code and item["entity_id"] == deployment_id
+        )
+        assert finding["classification"] == "manual_review"
+        assert f"deployments:{deployment_id}" in finding["evidence_ids"]
+    assert _has(findings, "deployment_test_unknown", "D003")
+
+
 def test_events_after_audit_cutoff_are_not_tested():
     data = deepcopy(generate_demo_data())
     _record(data, "deployments", "deployment_id", "D001")["deployed_at"] = (
