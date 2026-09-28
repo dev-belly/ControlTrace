@@ -82,6 +82,39 @@ def test_missing_evidence_requires_review_instead_of_a_false_conclusion():
     assert not _has(findings, "emergency_approval_overdue", "D005")
 
 
+@pytest.mark.parametrize(
+    ("table", "key", "record_id", "field", "issue_code", "entity_id"),
+    [
+        ("hr_events", "event_id", "TERM-001", "event_at", "hr_event_time_unknown", "TERM-001"),
+        ("entitlements", "entitlement_id", "EN006", "granted_at", "entitlement_grant_time_unknown", "EN006"),
+        ("access_reviews", "review_id", "RV006", "due_at", "privileged_review_due_unknown", "EN006"),
+        ("deployments", "deployment_id", "D001", "deployed_at", "deployment_time_unknown", "D001"),
+        ("deployments", "deployment_id", "D005", "deployed_at", "emergency_deployment_time_unknown", "D005"),
+    ],
+)
+def test_missing_key_timestamp_is_an_explicit_evidence_gap(
+    table, key, record_id, field, issue_code, entity_id
+):
+    data = deepcopy(generate_demo_data())
+    _record(data, table, key, record_id)[field] = ""
+    finding = next(
+        item for item in evaluate(data)
+        if item["issue_code"] == issue_code and item["entity_id"] == entity_id
+    )
+    assert finding["classification"] == "manual_review"
+    assert f"{table}:{record_id}" in finding["evidence_ids"]
+
+
+def test_missing_grant_time_on_nonprivileged_role_is_outside_ct02_scope():
+    data = deepcopy(generate_demo_data())
+    privileged_roles = {row["role_id"] for row in data["roles"] if row["is_privileged"]}
+    ordinary = next(
+        row for row in data["entitlements"] if row["role_id"] not in privileged_roles
+    )
+    ordinary["granted_at"] = ""
+    assert not _has(evaluate(data), "entitlement_grant_time_unknown", ordinary["entitlement_id"])
+
+
 def test_missing_hr_account_links_are_explicit_evidence_gaps():
     data = deepcopy(generate_demo_data())
     data["accounts"] = [

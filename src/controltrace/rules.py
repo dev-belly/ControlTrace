@@ -24,7 +24,7 @@ RULES: dict[str, dict[str, Any]] = {
             "roles.owner_department",
         ],
         "logic": "离职后48小时内停用账号；转岗后5×24小时内撤销原部门专属角色。所有时间均为UTC，等于期限视为按时。",
-        "exceptions": "共享角色（owner_department=GLOBAL）不视为原部门权限；来源缺少原部门、角色归属或事件关联不到账号时列为待人工判断。期限恰在审计截止日届满时纳入测试。",
+        "exceptions": "共享角色（owner_department=GLOBAL）不视为原部门权限；来源缺少人事事件时间、原部门、角色归属或事件关联不到账号时列为待人工判断。期限恰在审计截止日届满时纳入测试。",
         "limitations": "账号停用时间及角色归属来自模拟抽取；关联不到账号不等于员工确实没有账号，也无法判断企业批准的延长期或系统外补偿控制。",
         "threshold": "offboarding=48 hours; transfer=5 days",
     },
@@ -38,7 +38,7 @@ RULES: dict[str, dict[str, Any]] = {
             "access_reviews.period_end/due_at/completed_at",
         ],
         "logic": "批准必须关联同一账号和角色、决定为APPROVED，且申请时间不晚于批准时间、批准时间不晚于授予时间、有效期不早于授予。复核完成时间不得晚于due_at。",
-        "exceptions": "审批检查截止日前全部高权限授予；复核只检查到期时仍有效的授权。未到复核到期日不判逾期；有效授权无复核记录列为人工核实。职责冲突由CT-03单独检测。",
+        "exceptions": "审批检查截止日前全部高权限授予；复核只检查到期时仍有效的授权。授予时间或复核期限缺失时列为人工核实；未到复核到期日不判逾期；有效授权无复核记录列为人工核实。职责冲突由CT-03单独检测。",
         "limitations": "本测试依赖账号、角色、审批和复核导出完整性；授权关联不到账号或角色是证据缺口，最终定性仍需核对原系统。",
         "threshold": "approval <= grant; review completion <= due_at",
     },
@@ -63,7 +63,7 @@ RULES: dict[str, dict[str, Any]] = {
             "code_commits.ticket_id/committed_at",
         ],
         "logic": "标准部署须关联同系统工单，approved_at、tested_at和committed_at不晚于deployed_at；提交记录缺失、提交关联工单不一致或缺失时间列为待人工判断。",
-        "exceptions": "标记为EMERGENCY的部署适用CT-05补批控制；未知部署类型列为待人工判断。",
+        "exceptions": "标记为EMERGENCY的部署适用CT-05补批控制；部署时间缺失或部署类型未知时列为待人工判断。",
         "limitations": "时间戳证明记录顺序；提交记录缺失或关联工单不一致仅说明证据链需核实，不证明测试质量、审批独立性、代码内容或部署范围。",
         "threshold": "ticket exists; approval/test/commit <= deployment",
     },
@@ -76,7 +76,7 @@ RULES: dict[str, dict[str, Any]] = {
             "emergency_changes.retrospective_approved_at/retrospective_approver_id",
         ],
         "logic": "同部署、同工单的补批时间应位于部署后24小时内；超过期限仍无完整补批或补批过晚则命中。截止日时限尚未届满列为待人工判断。",
-        "exceptions": "恰在24小时期限完成补批视为按时；期限恰在截止日届满而无补批视为逾期。工单关联不一致或补批时间早于部署需人工核实。",
+        "exceptions": "恰在24小时期限完成补批视为按时；期限恰在截止日届满而无补批视为逾期。部署时间缺失、工单关联不一致或补批时间早于部署需人工核实。",
         "limitations": "只测试时间和记录存在性；紧急程度、补批权限与变更合理性需人工阅读原始材料。",
         "threshold": "deployment <= retrospective approval <= deployment + 24 hours",
     },
@@ -196,8 +196,19 @@ def evaluate(data: dict[str, list[dict]]) -> list[dict[str, Any]]:
 
     # CT-01: HR events drive the window. A late disable or revoke still counts.
     for event in data["hr_events"]:
+        if event["event_type"] not in {"TERMINATION", "TRANSFER"}:
+            continue
         event_at = parse_utc(event["event_at"])
-        assert event_at is not None
+        if event_at is None:
+            findings.append(_finding(
+                "CT-01", "hr_event_time_unknown", "人事事件生效时间缺失",
+                "manual_review", "medium", "UNKNOWN", "UNKNOWN", "hr_event", event["event_id"],
+                "人事事件缺少生效时间，无法计算账号或权限回收期限。",
+                f"人事事件 {event['event_id']} 类型为 {event['event_type']}；"
+                "event_at 为空，需核对 HR 原始记录。",
+                [("hr_events", event)],
+            ))
+            continue
         if event["event_type"] == "TERMINATION":
             due = event_at + timedelta(hours=48)
             if cutoff < due:
@@ -299,10 +310,24 @@ def evaluate(data: dict[str, list[dict]]) -> list[dict[str, Any]]:
 
     # CT-02: test historical grant approvals and reviews due while access was active.
     for entitlement in data["entitlements"]:
-        granted = parse_utc(entitlement["granted_at"])
-        if granted is None or granted > cutoff:
-            continue
         role = roles.get(entitlement["role_id"])
+        granted = parse_utc(entitlement["granted_at"])
+        if granted is None:
+            if role is not None and not role["is_privileged"]:
+                continue
+            account = accounts_by_id.get(entitlement["account_id"])
+            findings.append(_finding(
+                "CT-02", "entitlement_grant_time_unknown", "授权生效时间缺失",
+                "manual_review", "medium", account["system_id"] if account else "UNKNOWN",
+                "UNKNOWN", "entitlement", entitlement["entitlement_id"],
+                "授权缺少授予时间，无法判断审批是否事前完成或复核是否到期。",
+                f"授权 {entitlement['entitlement_id']} 的 granted_at 为空，"
+                "需核对 IAM 原始记录。",
+                [("entitlements", entitlement), ("accounts", account), ("roles", role)],
+            ))
+            continue
+        if granted > cutoff:
+            continue
         account = accounts_by_id.get(entitlement["account_id"])
         if role is None or account is None:
             missing = "、".join(
@@ -362,6 +387,18 @@ def evaluate(data: dict[str, list[dict]]) -> list[dict[str, Any]]:
             and (revoked is None or revoked > parse_utc(review["due_at"]))
             and granted <= parse_utc(review["due_at"])
         ]
+        for review in reviews_by_entitlement.get(entitlement["entitlement_id"], []):
+            if parse_utc(review["due_at"]) is None:
+                findings.append(_finding(
+                    "CT-02", "privileged_review_due_unknown", "高权限复核期限缺失",
+                    "manual_review", "medium", account["system_id"],
+                    review["period_end"], "entitlement", entitlement["entitlement_id"],
+                    "复核记录缺少到期时间，无法判断该周期是否逾期。",
+                    f"复核 {review['review_id']} 的 due_at 为空；"
+                    "需核对复核计划和源记录。",
+                    [("accounts", account), ("roles", role),
+                     ("entitlements", entitlement), ("access_reviews", review)],
+                ))
         if not reviews_by_entitlement.get(entitlement["entitlement_id"]) and (
             revoked is None or revoked > cutoff
         ):
@@ -441,7 +478,18 @@ def evaluate(data: dict[str, list[dict]]) -> list[dict[str, Any]]:
         if deployment["deployment_type"] == "EMERGENCY":
             continue
         deployed = parse_utc(deployment["deployed_at"])
-        if deployed is None or deployed > cutoff:
+        if deployed is None:
+            findings.append(_finding(
+                "CT-04", "deployment_time_unknown", "生产部署时间缺失",
+                "manual_review", "medium", deployment["system_id"], "UNKNOWN",
+                "deployment", deployment["deployment_id"],
+                "部署缺少时间，无法核对工单审批、测试和提交先后。",
+                f"部署 {deployment['deployment_id']} 的 deployed_at 为空；"
+                "需核对发布流水线原始记录。",
+                [("deployments", deployment)],
+            ))
+            continue
+        if deployed > cutoff:
             continue
         if deployment["deployment_type"] != "STANDARD":
             findings.append(_finding(
@@ -551,7 +599,21 @@ def evaluate(data: dict[str, list[dict]]) -> list[dict[str, Any]]:
         if deployment["deployment_type"] != "EMERGENCY":
             continue
         deployed = parse_utc(deployment["deployed_at"])
-        if deployed is None or deployed > cutoff:
+        if deployed is None:
+            findings.append(_finding(
+                "CT-05", "emergency_deployment_time_unknown", "应急部署时间缺失",
+                "manual_review", "medium", deployment["system_id"], "UNKNOWN",
+                "deployment", deployment["deployment_id"],
+                "应急部署缺少时间，无法计算补充审批的24小时期限。",
+                f"部署 {deployment['deployment_id']} 的 deployed_at 为空；"
+                "需核对发布流水线原始记录。",
+                [("deployments", deployment)] + [
+                    ("emergency_changes", row)
+                    for row in emergency_by_deployment.get(deployment["deployment_id"], [])
+                ],
+            ))
+            continue
+        if deployed > cutoff:
             continue
         due = deployed + timedelta(hours=24)
         emergencies = emergency_by_deployment.get(deployment["deployment_id"], [])

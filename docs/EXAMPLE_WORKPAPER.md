@@ -4,7 +4,7 @@
 
 - Audit cutoff: `2025-06-30T23:59:59Z`
 - Dataset SHA-256: `8781ddd17419edf9c90b31c9e25abc33ffeb2e27dc7fc182eca717a2d966de4c`
-- ControlTrace version: `0.2.1`
+- ControlTrace version: `0.2.2`
 - Control: `CT-04` — 变更审批晚于生产部署
 - Classification: `exception`; risk: `high`
 - System: `CODE-HUB`; subject: `deployment:D002`
@@ -16,7 +16,7 @@
 - **Objective:** 标准生产部署有同系统工单，且审批与测试在部署前完成。
 - **Inputs:** deployments.deployment_id/system_id/ticket_id/commit_id/deployed_at/deployment_type; change_tickets.system_id/approved_at/tested_at; code_commits.ticket_id/committed_at
 - **Logic:** 标准部署须关联同系统工单，approved_at、tested_at和committed_at不晚于deployed_at；提交记录缺失、提交关联工单不一致或缺失时间列为待人工判断。
-- **Exceptions:** 标记为EMERGENCY的部署适用CT-05补批控制；未知部署类型列为待人工判断。
+- **Exceptions:** 标记为EMERGENCY的部署适用CT-05补批控制；部署时间缺失或部署类型未知时列为待人工判断。
 - **Limitations:** 时间戳证明记录顺序；提交记录缺失或关联工单不一致仅说明证据链需核实，不证明测试质量、审批独立性、代码内容或部署范围。
 
 ## Automated observation
