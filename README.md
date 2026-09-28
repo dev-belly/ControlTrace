@@ -83,7 +83,7 @@ python -m ruff check src tests
 python -m pytest -q
 ```
 
-**本机验证（2026-09-27）：** `uv run ruff check .`、项目构建和 `uv run pytest -q` 均通过，**29 passed**；测试覆盖日期边界、重复源事件、缺失关联、复核状态、界面筛选、导出校验及重放。一条命令启动 Streamlit 后，实际检查了异常行选择、D002 的时间线、复核保存以及 CSV/ZIP 导出。合成数据产生 12 条预置线索（9 条按演示口径命中，3 条待人工判断），并与 `expected_results` 完全对应。远端 CI 结果需在本次发布后单独核实。
+**本机验证（2026-09-27）：** `uv run ruff check .`、项目构建和 `uv run pytest -q` 均通过，**29 passed**；测试覆盖日期边界、重复源事件、缺失关联、复核状态、界面筛选、导出校验及重放。一条命令启动 Streamlit 后，实际检查了异常行选择、D002 的时间线、复核保存以及 CSV/ZIP 导出。合成数据产生 12 条预置线索（9 条按演示口径命中，3 条待人工判断），并与 `expected_results` 完全对应。发布提交的 [GitHub Actions CI](https://github.com/dev-belly/ControlTrace/actions/runs/36322908548) 已在 Python 3.11 和 3.12 上通过；后续提交状态以 Actions 页面为准。
 
 ## 已知局限
 
