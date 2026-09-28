@@ -4,7 +4,7 @@
 
 - Audit cutoff: `2025-06-30T23:59:59Z`
 - Dataset SHA-256: `8781ddd17419edf9c90b31c9e25abc33ffeb2e27dc7fc182eca717a2d966de4c`
-- ControlTrace version: `0.2.3`
+- ControlTrace version: `0.2.4`
 - Control: `CT-04` — 变更审批晚于生产部署
 - Classification: `exception`; risk: `high`
 - System: `CODE-HUB`; subject: `deployment:D002`

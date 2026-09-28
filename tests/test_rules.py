@@ -225,6 +225,39 @@ def test_privileged_approval_cannot_precede_request_and_blank_expiry_is_missing(
     assert not _has(findings, "privileged_approval_missing", "EN014")
 
 
+@pytest.mark.parametrize(
+    ("table", "key", "record_id", "field"),
+    [
+        ("access_requests", "request_id", "Q006", "submitted_at"),
+        ("access_approvals", "approval_id", "AP006", "decided_at"),
+    ],
+)
+def test_incomplete_approval_timing_needs_review_not_a_definite_exception(
+    table, key, record_id, field
+):
+    data = deepcopy(generate_demo_data())
+    _record(data, table, key, record_id)[field] = ""
+    findings = evaluate(data)
+    item = next(
+        finding for finding in findings
+        if finding["issue_code"] == "privileged_approval_sequence_unknown"
+        and finding["entity_id"] == "EN006"
+    )
+    assert item["classification"] == "manual_review"
+    assert f"{table}:{record_id}" in item["evidence_ids"]
+    assert not _has(findings, "privileged_approval_missing", "EN006")
+
+
+def test_approval_after_grant_remains_a_definite_exception():
+    data = deepcopy(generate_demo_data())
+    _record(data, "access_approvals", "approval_id", "AP006")["decided_at"] = (
+        "2025-06-05T10:00:01Z"
+    )
+    findings = evaluate(data)
+    assert _has(findings, "privileged_approval_missing", "EN006")
+    assert not _has(findings, "privileged_approval_sequence_unknown", "EN006")
+
+
 def test_missing_or_mismatched_commit_is_an_explicit_evidence_gap():
     data = deepcopy(generate_demo_data())
     data["code_commits"] = [

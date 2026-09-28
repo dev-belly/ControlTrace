@@ -38,7 +38,7 @@ RULES: dict[str, dict[str, Any]] = {
             "access_reviews.period_end/due_at/completed_at",
         ],
         "logic": "批准必须关联同一账号和角色、决定为APPROVED，且申请时间不晚于批准时间、批准时间不晚于授予时间、有效期不早于授予。复核完成时间不得晚于due_at。",
-        "exceptions": "审批检查截止日前全部高权限授予；复核只检查到期时仍有效的授权。授予时间或复核期限缺失时列为人工核实；未到复核到期日不判逾期；有效授权无复核记录列为人工核实。职责冲突由CT-03单独检测。",
+        "exceptions": "审批检查截止日前全部高权限授予；复核只检查到期时仍有效的授权。授予、申请或批准时间缺失且其余批准证据相符时列为人工核实；复核期限缺失或有效授权无复核记录也列为人工核实。未到复核到期日不判逾期。职责冲突由CT-03单独检测。",
         "limitations": "本测试依赖账号、角色、审批和复核导出完整性；授权关联不到账号或角色是证据缺口，最终定性仍需核对原系统。",
         "threshold": "approval <= grant; review completion <= due_at",
     },
@@ -370,31 +370,41 @@ def evaluate(data: dict[str, list[dict]]) -> list[dict[str, Any]]:
         request = requests.get(entitlement["request_id"] or "")
         approvals = approvals_by_request.get(entitlement["request_id"] or "", [])
         submitted = parse_utc(request["submitted_at"]) if request else None
-        matching_request = (
+        request_matches = (
             request is not None and request["account_id"] == entitlement["account_id"]
             and request["role_id"] == entitlement["role_id"]
-            and submitted is not None and submitted <= granted
         )
         valid = False
-        if matching_request and submitted is not None:
+        sequence_unknown = False
+        if request_matches and (submitted is None or submitted <= granted):
             for approval in approvals:
                 decided = parse_utc(approval["decided_at"])
                 expires = parse_utc(approval["valid_until"])
-                if (
-                    approval["decision"] == "APPROVED"
-                    and decided is not None and submitted <= decided <= granted
-                    and (expires is None or expires >= granted)
-                ):
+                if (approval["decision"] != "APPROVED"
+                        or (decided is not None and decided > granted)
+                        or (expires is not None and expires < granted)):
+                    continue
+                if submitted is None or decided is None:
+                    sequence_unknown = True
+                elif submitted <= decided:
                     valid = True
                     break
         if not valid:
             findings.append(_finding(
-                "CT-02", "privileged_approval_missing", "高权限缺少有效事前审批",
-                "exception", "high", account["system_id"], entitlement["granted_at"],
+                "CT-02",
+                "privileged_approval_sequence_unknown" if sequence_unknown
+                else "privileged_approval_missing",
+                "高权限审批顺序无法确认" if sequence_unknown else "高权限缺少有效事前审批",
+                "manual_review" if sequence_unknown else "exception",
+                "medium" if sequence_unknown else "high",
+                account["system_id"], entitlement["granted_at"],
                 "entitlement", entitlement["entitlement_id"],
-                "高权限授予前未找到同账号同角色的有效批准。",
+                "关联申请或批准缺少时间，无法核对是否事前批准。" if sequence_unknown
+                else "高权限授予前未找到同账号同角色的有效批准。",
                 f"权限 {entitlement['entitlement_id']} 于 {entitlement['granted_at']} 授予；"
-                f"关联申请 {entitlement['request_id'] or '空'}；符合口径的事前审批不存在。",
+                f"关联申请 {entitlement['request_id'] or '空'}；"
+                + ("申请或批准时间缺失，需核对原始审批链。" if sequence_unknown
+                   else "符合口径的事前审批不存在。"),
                 [("accounts", account), ("roles", role), ("entitlements", entitlement),
                  ("access_requests", request)]
                 + [("access_approvals", approval) for approval in approvals],
