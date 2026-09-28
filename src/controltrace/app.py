@@ -134,7 +134,7 @@ for control_id, rule in RULES.items():
             "Observations": sum(item["control_id"] == control_id for item in findings),
         }
     )
-st.dataframe(pd.DataFrame(coverage_rows), hide_index=True, use_container_width=True)
+st.dataframe(pd.DataFrame(coverage_rows), hide_index=True, width="stretch")
 st.caption(
     "Source rows show available input volume, not a pass rate. See the control catalog "
     "and workpapers for rule scope and evidence gaps."
@@ -163,7 +163,7 @@ for item in filtered:
 selection = st.dataframe(
     pd.DataFrame(table_rows),
     hide_index=True,
-    use_container_width=True,
+    width="stretch",
     on_select="rerun",
     selection_mode="single-row",
     key="finding_table_"
@@ -183,7 +183,7 @@ with csv_col:
         exception_csv(filtered),
         file_name="controltrace-exceptions.csv",
         mime="text/csv",
-        use_container_width=True,
+        width="stretch",
     )
 with zip_col:
     st.download_button(
@@ -191,7 +191,7 @@ with zip_col:
         workpaper_zip(DB_PATH, {item["finding_id"] for item in filtered}),
         file_name="controltrace-workpapers.zip",
         mime="application/zip",
-        use_container_width=True,
+        width="stretch",
     )
 
 st.divider()
@@ -280,7 +280,7 @@ with right:
         value=current.get("notes", ""),
         key=f"review_notes_{finding_id}",
     )
-    submitted = st.button("Save review", type="primary", use_container_width=True)
+    submitted = st.button("Save review", type="primary", width="stretch")
     if submitted:
         if not reviewer.strip() or not notes.strip():
             st.error("Reviewer and notes are required to preserve a usable review trail.")

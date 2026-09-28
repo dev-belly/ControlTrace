@@ -220,7 +220,7 @@ wheels = [
 
 [[package]]
 name = "controltrace"
-version = "0.2.4"
+version = "0.2.5"
 source = { editable = "." }
 dependencies = [
     { name = "duckdb" },
@@ -240,7 +240,7 @@ requires-dist = [
     { name = "pandas", specifier = ">=2.2,<3" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8,<10" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.8,<1" },
-    { name = "streamlit", specifier = ">=1.40,<2" },
+    { name = "streamlit", specifier = ">=1.51,<2" },
 ]
 provides-extras = ["dev"]
 
