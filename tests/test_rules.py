@@ -167,6 +167,53 @@ def test_missing_role_owner_department_needs_transfer_review():
     assert not _has(findings, "transfer_old_role_retained", "EN003")
 
 
+def test_missing_transfer_grant_time_is_a_reviewable_evidence_gap():
+    data = deepcopy(generate_demo_data())
+    entitlement = _record(data, "entitlements", "entitlement_id", "EN003")
+    entitlement["granted_at"] = ""
+    findings = evaluate(data)
+    item = next(
+        finding for finding in findings
+        if finding["issue_code"] == "transfer_grant_time_unknown"
+        and finding["entity_id"] == "EN003"
+    )
+    assert item["classification"] == "manual_review"
+    assert "hr_events:MOVE-003" in item["evidence_ids"]
+    assert "entitlements:EN003" in item["evidence_ids"]
+    assert not _has(findings, "transfer_old_role_retained", "EN003")
+
+    entitlement["revoked_at"] = "2025-06-06T09:00:00Z"
+    assert not _has(evaluate(data), "transfer_grant_time_unknown", "EN003")
+
+
+@pytest.mark.parametrize("missing_time", ["", " "])
+def test_missing_request_time_does_not_hide_approved_self_approval(missing_time):
+    data = deepcopy(generate_demo_data())
+    _record(data, "access_requests", "request_id", "Q007")["submitted_at"] = missing_time
+    findings = evaluate(data)
+    item = next(
+        finding for finding in findings
+        if finding["issue_code"] == "sensitive_self_approval"
+        and finding["entity_id"] == "Q007"
+    )
+    assert item["classification"] == "exception"
+    assert item["occurred_at"] == _record(
+        data, "access_approvals", "approval_id", "AP007"
+    )["decided_at"]
+    assert "access_requests:Q007" in item["evidence_ids"]
+    assert "access_approvals:AP007" in item["evidence_ids"]
+
+    data["role_permissions"] = [
+        row for row in data["role_permissions"] if row["role_id"] != "R_PAYMENT"
+    ]
+    mapping_gap = next(
+        finding for finding in evaluate(data)
+        if finding["issue_code"] == "request_sensitivity_mapping_missing"
+        and finding["entity_id"] == "Q007"
+    )
+    assert mapping_gap["occurred_at"] == item["occurred_at"]
+
+
 def test_privileged_approval_cannot_precede_request_and_blank_expiry_is_missing():
     data = deepcopy(generate_demo_data())
     _record(data, "access_approvals", "approval_id", "AP006")["decided_at"] = (

@@ -24,7 +24,7 @@ RULES: dict[str, dict[str, Any]] = {
             "roles.owner_department",
         ],
         "logic": "离职后48小时内停用账号；转岗后5×24小时内撤销原部门专属角色。所有时间均为UTC，等于期限视为按时。",
-        "exceptions": "共享角色（owner_department=GLOBAL）不视为原部门权限；来源缺少人事事件时间、原部门、角色归属或事件关联不到账号时列为待人工判断。期限恰在审计截止日届满时纳入测试。",
+        "exceptions": "共享角色（owner_department=GLOBAL）不视为原部门权限；来源缺少人事事件时间、原部门、角色归属、授权时间或事件关联不到账号时列为待人工判断。期限恰在审计截止日届满时纳入测试。",
         "limitations": "账号停用时间及角色归属来自模拟抽取；关联不到账号不等于员工确实没有账号，也无法判断企业批准的延长期或系统外补偿控制。",
         "threshold": "offboarding=48 hours; transfer=5 days",
     },
@@ -50,7 +50,7 @@ RULES: dict[str, dict[str, Any]] = {
             "role_permissions.is_sensitive",
         ],
         "logic": "已批准的敏感角色申请中，requester_id等于approver_id即命中。",
-        "exceptions": "只检查角色含敏感权限且存在APPROVED决定的申请；敏感性映射缺失时列为待人工判断。其他职责冲突组合暂未覆盖。",
+        "exceptions": "只检查角色含敏感权限且存在截止日前APPROVED决定的申请；申请时间缺失不妨碍核对申请人和批准人ID，审批时序由CT-02判断。敏感性映射缺失时列为待人工判断。其他职责冲突组合暂未覆盖。",
         "limitations": "不同人员ID可能对应同一自然人，或同一共享账号可能代表多人；本演示无法识别这类身份映射。",
         "threshold": "requester_id != approver_id",
     },
@@ -267,7 +267,26 @@ def evaluate(data: dict[str, list[dict]]) -> list[dict[str, Any]]:
                     continue
                 granted = parse_utc(entitlement["granted_at"])
                 revoked = parse_utc(entitlement["revoked_at"])
-                if granted is None or granted > event_at or (revoked is not None and revoked <= due):
+                if revoked is not None and revoked <= due:
+                    continue
+                if granted is None:
+                    if (role["owner_department"] == event["from_department"]
+                            or role["owner_department"] is None
+                            or event["from_department"] is None):
+                        findings.append(_finding(
+                            "CT-01", "transfer_grant_time_unknown", "转岗权限授予时间缺失",
+                            "manual_review", "medium", account["system_id"], event["event_at"],
+                            "entitlement", entitlement["entitlement_id"],
+                            "授权缺少授予时间，无法确认是否属于转岗前已有旧权限。",
+                            f"转岗事件 {event['event_id']} 对应授权 "
+                            f"{entitlement['entitlement_id']} 的 granted_at 为空；"
+                            f"截至回收期限 {due.isoformat().replace('+00:00', 'Z')} "
+                            "未见按时撤销，需核对 IAM 原始记录。",
+                            [("hr_events", event), ("accounts", account),
+                             ("entitlements", entitlement), ("roles", role)],
+                        ))
+                    continue
+                if granted > event_at:
                     continue
                 if role["owner_department"] is None:
                     findings.append(_finding(
@@ -430,7 +449,7 @@ def evaluate(data: dict[str, list[dict]]) -> list[dict[str, Any]]:
     # CT-03: a clear same-identity conflict on approved sensitive requests.
     for request in data["access_requests"]:
         submitted = parse_utc(request["submitted_at"])
-        if submitted is None or submitted > cutoff:
+        if submitted is not None and submitted > cutoff:
             continue
         role_permissions = permissions_by_role.get(request["role_id"], [])
         sensitive_permissions = [row for row in role_permissions if row["is_sensitive"]]
@@ -445,7 +464,9 @@ def evaluate(data: dict[str, list[dict]]) -> list[dict[str, Any]]:
             findings.append(_finding(
                 "CT-03", "request_sensitivity_mapping_missing", "申请角色敏感性映射缺失",
                 "manual_review", "medium", account["system_id"] if account else "UNKNOWN",
-                request["submitted_at"], "access_request", request["request_id"],
+                (request["submitted_at"] if submitted is not None else min(
+                    approval["decided_at"] for approval in relevant_approvals
+                )), "access_request", request["request_id"],
                 "已批准的角色申请缺少权限映射，无法判断是否需要职责分离测试。",
                 f"申请 {request['request_id']} 的角色 {request['role_id']} "
                 "未在角色权限抽取中出现，需核对角色权限总体。",

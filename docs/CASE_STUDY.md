@@ -47,7 +47,7 @@ CT-04 要求标准生产部署有同系统变更工单，且审批、测试完�
 
 ## 5. 导出与复现
 
-本次实际导出的[单条 Markdown 底稿](EXAMPLE_WORKPAPER.md)保留了规则目标、输入字段、判断逻辑、限制、完整来源行、时间线及示范复核记录。程序导出的 `workpapers.zip` 还包含全部合成源表的原值 JSON 和便于表格查看的 CSV、`rules.json`、`findings.csv` 和 `manifest.json`；清单记录每个文件的 SHA-256 以及总数据指纹。
+本次实际导出的[单条 Markdown 底稿](EXAMPLE_WORKPAPER.md)保留了规则目标、输入字段、判断逻辑、限制、完整来源行、时间线及示范复核记录。程序导出的 `workpapers.zip` 还包含全部合成源表的原值 JSON 和便于表格查看的 CSV、`rules.json`、`reviews.json`、`findings.csv` 和 `manifest.json`；清单记录每个文件的 SHA-256 以及总数据指纹。
 
 ```bash
 uv run controltrace demo
