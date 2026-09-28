@@ -4,7 +4,7 @@
 
 - Audit cutoff: `2025-06-30T23:59:59Z`
 - Dataset SHA-256: `8781ddd17419edf9c90b31c9e25abc33ffeb2e27dc7fc182eca717a2d966de4c`
-- ControlTrace version: `0.2.0`
+- ControlTrace version: `0.2.1`
 - Control: `CT-04` — 变更审批晚于生产部署
 - Classification: `exception`; risk: `high`
 - System: `CODE-HUB`; subject: `deployment:D002`
@@ -51,6 +51,6 @@
 
 ## Reproduction
 
-From the project root, run `uv run controltrace verify --bundle workpapers.zip` to check file hashes and replay the current rules against `source_tables/*.json`. Match the finding ID and source IDs above to the JSON rows. To regenerate the synthetic dataset separately, run `uv run controltrace generate` and then `uv run controltrace test`. CSV files are protected against spreadsheet formulas; the generation seed and cutoff are in `manifest.json`.
+From the project root, run `uv run controltrace verify --bundle workpapers.zip` to check file hashes and replay the current rules against `source_tables/*.json`. The verifier compares the CSV copies, `reviews.json`, and this workpaper with the replayed result. Match the finding ID and source IDs above to the JSON rows. To regenerate the synthetic dataset separately, run `uv run controltrace generate` and then `uv run controltrace test`. CSV files are protected against spreadsheet formulas; the generation seed and cutoff are in `manifest.json`.
 
 An automated observation is a review candidate. The reviewer is responsible for assessing evidence completeness and documenting the final conclusion.

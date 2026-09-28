@@ -56,4 +56,4 @@ uv run controltrace export
 uv run controltrace verify --bundle exports/workpapers.zip
 ```
 
-在新安装环境中，固定种子会复现同一条自动发现及其来源 ID；**人工复核不会预置**，应由使用者在界面自行记录。`verify` 会校验包内文件并以 JSON 原值重放当前规则；也可将导出的 `source_tables/deployments.json`、`code_commits.json` 和 `change_tickets.json` 对应 ID 与底稿逐字段核对，再比较 `approved_at`、`tested_at`、`committed_at` 和 `deployed_at`。重放须使用与底稿一致的规则版本；`expected_results` 只是合成案例的测试答案，不参与规则计算。
+在新安装环境中，固定种子会复现同一条自动发现及其来源 ID；**人工复核不会预置**，应由使用者在界面自行记录。`verify` 会校验包内文件、核对 CSV 与 JSON 一致性，并以 JSON 原值重放当前规则，将发现清单、复核历史与底稿逐字节对账；也可将导出的 `source_tables/deployments.json`、`code_commits.json` 和 `change_tickets.json` 对应 ID 与底稿逐字段核对，再比较 `approved_at`、`tested_at`、`committed_at` 和 `deployed_at`。重放须使用与底稿一致的规则版本；`expected_results` 只是合成案例的测试答案，不参与规则计算。

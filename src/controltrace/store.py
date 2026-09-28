@@ -38,22 +38,24 @@ def _rows(cursor: duckdb.DuckDBPyConnection) -> list[dict]:
     return [dict(zip(names, values, strict=True)) for values in cursor.fetchall()]
 
 
-def initialize_db(path: str | Path, seed: int = DEFAULT_SEED) -> None:
+def initialize_db(path: str | Path, seed: int | None = None) -> None:
     """Initialize once. Rerunning with the same seed never resets review records.
 
-    A different seed requires a new database path, avoiding silent replacement of
-    existing analyst work.
+    A new database uses DEFAULT_SEED unless a seed is supplied. Existing
+    databases retain their seed when one is omitted; an explicit different
+    seed requires a new path, avoiding silent replacement of analyst work.
     """
     con = _connect(path)
     try:
         con.execute("CREATE TABLE IF NOT EXISTS meta (key VARCHAR PRIMARY KEY, value VARCHAR NOT NULL)")
         prior = con.execute("SELECT value FROM meta WHERE key = 'seed'").fetchone()
         if prior:
-            if prior[0] != str(seed):
+            if seed is not None and prior[0] != str(seed):
                 raise ValueError(
                     f"Database already uses seed {prior[0]}; choose a new database path for seed {seed}"
                 )
             return
+        seed = DEFAULT_SEED if seed is None else seed
         fixture = generate_demo_data(seed)
         con.execute("BEGIN TRANSACTION")
         try:

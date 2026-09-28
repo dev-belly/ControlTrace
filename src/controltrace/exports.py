@@ -129,6 +129,8 @@ def finding_workpaper(finding: dict[str, Any], dataset_sha256: str) -> str:
         "",
         "From the project root, run `uv run controltrace verify --bundle workpapers.zip` "
         "to check file hashes and replay the current rules against `source_tables/*.json`. "
+        "The verifier compares the CSV copies, `reviews.json`, and this workpaper "
+        "with the replayed result. "
         "Match the finding ID and source IDs above to the JSON rows. To regenerate the "
         "synthetic dataset separately, run `uv run controltrace generate` and then "
         "`uv run controltrace test`. CSV files are protected against spreadsheet formulas; "
@@ -166,11 +168,15 @@ def workpaper_zip(db_path: str | Path, finding_ids: set[str] | None = None) -> b
     members = {
         **source_files,
         "findings.csv": exception_csv(findings),
+        "reviews.json": _json({
+            finding["finding_id"]: finding["review_history"] for finding in findings
+        }).encode("utf-8"),
         "rules.json": _json(RULES).encode("utf-8"),
         "README.txt": (
             "Synthetic ControlTrace workpapers. Check manifest.json hashes before using "
             "source_tables/*.json for exact source values. CSV copies protect against "
-            "spreadsheet formulas. Review decisions are separate from the automated test. "
+            "spreadsheet formulas. Review decisions are in reviews.json and separate "
+            "from the automated test. "
             "Run `uv run controltrace verify --bundle workpapers.zip` to replay the rules "
             "against this source snapshot.\n"
         ).encode("utf-8"),
@@ -183,6 +189,7 @@ def workpaper_zip(db_path: str | Path, finding_ids: set[str] | None = None) -> b
     })
     manifest = {
         "notice": "Synthetic case study; no real enterprise audit data",
+        "bundle_format_version": 2,
         "audit_cutoff": DEMO_CUTOFF,
         "generator_seed": int(meta.get("seed", DEFAULT_SEED)),
         "controltrace_version": __version__,

@@ -9,7 +9,7 @@ import zipfile
 
 import pytest
 
-from controltrace.exports import exception_csv, workpaper_zip
+from controltrace.exports import _json, exception_csv, workpaper_zip
 from controltrace.rules import run_tests
 from controltrace.store import get_finding, get_table_rows, initialize_db, save_review
 from controltrace.verify import BundleVerificationError, verify_bundle
@@ -99,6 +99,70 @@ def test_bundle_verifier_rejects_changed_source_even_when_zip_is_readable(tmp_pa
             target.writestr(name, content)
     with pytest.raises(BundleVerificationError, match="File hash mismatch"):
         verify_bundle(tampered)
+
+
+def _rewrite_bundle_with_updated_hashes(original, path, member, replacement):
+    with zipfile.ZipFile(io.BytesIO(original)) as source:
+        files = {name: source.read(name) for name in source.namelist()}
+    files[member] = replacement(files[member])
+    manifest = json.loads(files["manifest.json"])
+    new_hash = hashlib.sha256(files[member]).hexdigest()
+    manifest["files_sha256"][member] = new_hash
+    if member in manifest["source_sha256"]:
+        manifest["source_sha256"][member] = new_hash
+        manifest["dataset_sha256"] = hashlib.sha256(
+            _json(manifest["source_sha256"]).encode("utf-8")
+        ).hexdigest()
+    files["manifest.json"] = _json(manifest).encode("utf-8")
+    with zipfile.ZipFile(path, "w") as target:
+        for name, content in files.items():
+            target.writestr(name, content)
+
+
+def test_verifier_rejects_changed_workpaper_with_rehashed_manifest(tmp_path):
+    db_path = tmp_path / "demo.duckdb"
+    initialize_db(db_path)
+    finding = run_tests(db_path)[0]
+    original = workpaper_zip(db_path, {finding["finding_id"]})
+    tampered = tmp_path / "workpaper-edited.zip"
+    member = f"workpapers/{finding['finding_id']}.md"
+    _rewrite_bundle_with_updated_hashes(
+        original, tampered, member,
+        lambda content: content.replace(b"## Automated observation", b"## Fabricated observation"),
+    )
+    with pytest.raises(BundleVerificationError, match="Workpaper differs"):
+        verify_bundle(tampered)
+
+
+def test_verifier_rejects_csv_or_review_mismatch_with_rehashed_manifest(tmp_path):
+    db_path = tmp_path / "demo.duckdb"
+    initialize_db(db_path)
+    finding = run_tests(db_path)[0]
+    save_review(db_path, finding["finding_id"], "Reviewer", "closed", "false_positive", "Explained")
+    original = workpaper_zip(db_path, {finding["finding_id"]})
+
+    csv_edited = tmp_path / "csv-edited.zip"
+    _rewrite_bundle_with_updated_hashes(
+        original, csv_edited, "findings.csv", lambda content: content + b"\n",
+    )
+    with pytest.raises(BundleVerificationError, match="Findings CSV differs"):
+        verify_bundle(csv_edited)
+
+    reviews_edited = tmp_path / "reviews-edited.zip"
+    _rewrite_bundle_with_updated_hashes(
+        original, reviews_edited, "reviews.json",
+        lambda content: content.replace(b"Explained", b"Invented"),
+    )
+    with pytest.raises(BundleVerificationError, match="Workpaper differs"):
+        verify_bundle(reviews_edited)
+
+    source_csv_edited = tmp_path / "source-csv-edited.zip"
+    _rewrite_bundle_with_updated_hashes(
+        original, source_csv_edited, "source_tables/accounts.csv",
+        lambda content: content + b"\n",
+    )
+    with pytest.raises(BundleVerificationError, match="Source CSV differs from JSON"):
+        verify_bundle(source_csv_edited)
 
 
 def test_filtered_workpaper_export_rejects_unknown_finding_ids(tmp_path):

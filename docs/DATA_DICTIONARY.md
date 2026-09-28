@@ -75,4 +75,4 @@ change_tickets.ticket_id ── code_commits.ticket_id
 code_commits.commit_id ──────── deployments.commit_id
 ```
 
-导出工作底稿 ZIP 时，`source_tables/` 同时保存这些合成源表的原值 JSON 和防表格公式注入的 CSV；`manifest.json` 保存全部包内文件的 SHA-256、总数据指纹、版本与审计截止时点。`uv run controltrace verify --bundle exports/workpapers.zip` 可核对哈希、以 JSON 原值重放规则，并将发现 ID、分类和证据 ID 对应到源记录。包内哈希不是数字签名，不能证明来源真实性。
+导出工作底稿 ZIP 时，`source_tables/` 同时保存这些合成源表的原值 JSON 和防表格公式注入的 CSV；`reviews.json` 保存所选发现的完整复核历史；`manifest.json` 保存格式版本、全部包内文件的 SHA-256、总数据指纹、应用版本与审计截止时点。`uv run controltrace verify --bundle exports/workpapers.zip` 可核对哈希、CSV/JSON 一致性、以 JSON 原值重放规则，并将所选发现清单及底稿与重放结果和复核历史逐字节比较。包内哈希不是数字签名，不能证明来源真实性。

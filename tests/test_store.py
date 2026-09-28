@@ -31,6 +31,20 @@ def test_repeat_generation_and_tests_preserve_review_and_source_snapshot(tmp_pat
         initialize_db(db_path, seed=123)
 
 
+def test_nondefault_seed_can_be_tested_and_rerun_without_replacing_sources(tmp_path):
+    db_path = tmp_path / "another-seed.duckdb"
+    initialize_db(db_path, seed=123)
+    before = get_table_rows(db_path, "employees")
+    first = run_tests(db_path)
+    assert first
+    initialize_db(db_path)
+    assert get_table_rows(db_path, "employees") == before
+    assert [finding["finding_id"] for finding in run_tests(db_path)] == [
+        finding["finding_id"] for finding in first
+    ]
+    assert {row["key"]: row["value"] for row in get_table_rows(db_path, "meta")}["seed"] == "123"
+
+
 def test_review_is_append_only_and_rejects_unknown_finding(tmp_path):
     db_path = tmp_path / "case.duckdb"
     initialize_db(db_path)

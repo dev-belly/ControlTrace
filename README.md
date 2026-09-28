@@ -62,7 +62,7 @@ uv run controltrace export     # 重新测试并导出 CSV、可核验底稿 ZIP
 uv run controltrace verify     # 校验 ZIP 文件哈希，并从包内源数据重放自动测试
 ```
 
-界面可以按系统、期间、控制类型和风险等级筛选线索；点开一条线索可查看事件时间线、关联记录、规则依据和证据 ID。复核者填写姓名、处理状态、结论与备注后，导出的 CSV 和 ZIP 会包含当前复核记录。ZIP 同时包含合成源表的原值 JSON、适合表格查看的 CSV、规则元数据、全部文件的 SHA-256 清单和逐条 Markdown 底稿。`verify` 会核对文件完整性，并用包内原值重放规则，比较完整发现清单、所选底稿和自动分类。
+界面可以按系统、期间、控制类型和风险等级筛选线索；点开一条线索可查看事件时间线、关联记录、规则依据和证据 ID。复核者填写姓名、处理状态、结论与备注后，导出的 CSV 和 ZIP 会包含当前复核记录。ZIP 同时包含合成源表的原值 JSON、适合表格查看的 CSV、机器可读的复核历史 `reviews.json`、规则元数据、全部文件的 SHA-256 清单和逐条 Markdown 底稿。`verify` 会核对文件哈希、CSV 与 JSON 的一致性，并用包内原值重放规则，逐字节比较所选发现清单与底稿。旧格式底稿须用当前版本重新导出。
 
 ## 数据字典与案例
 
@@ -83,7 +83,7 @@ python -m ruff check src tests
 python -m pytest -q
 ```
 
-**本机验证（2026-09-27）：** `uv run ruff check .`、项目构建和 `uv run pytest -q` 均通过，**29 passed**；测试覆盖日期边界、重复源事件、缺失关联、复核状态、界面筛选、导出校验及重放。一条命令启动 Streamlit 后，实际检查了异常行选择、D002 的时间线、复核保存以及 CSV/ZIP 导出。合成数据产生 12 条预置线索（9 条按演示口径命中，3 条待人工判断），并与 `expected_results` 完全对应。发布提交的 [GitHub Actions CI](https://github.com/dev-belly/ControlTrace/actions/runs/36322908548) 已在 Python 3.11 和 3.12 上通过；后续提交状态以 Actions 页面为准。
+**本机验证（2026-09-28）：** `uv run ruff check .`、项目构建和 `uv run pytest -q` 均通过，**32 passed**；测试覆盖日期边界、重复源事件、非默认种子、缺失关联、复核状态、界面筛选、导出校验及重放，还会拒绝包内哈希已更新但内容互相矛盾的底稿。一条命令启动 Streamlit 后，实际检查了异常行选择、D002 的时间线、复核保存以及 CSV/ZIP 导出。合成数据产生 12 条预置线索（9 条按演示口径命中，3 条待人工判断），并与 `expected_results` 完全对应。发布提交的 [GitHub Actions CI](https://github.com/dev-belly/ControlTrace/actions/runs/36322908548) 已在 Python 3.11 和 3.12 上通过；本次修复的对应 CI 结果以 Actions 页面为准。
 
 ## 已知局限
 
