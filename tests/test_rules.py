@@ -153,6 +153,33 @@ def test_missing_entitlement_role_or_account_is_not_silently_skipped():
     assert not _has(findings, "privileged_approval_missing", "EN005")
 
 
+def test_cross_system_entitlement_is_an_evidence_gap_not_a_control_exception():
+    data = deepcopy(generate_demo_data())
+    _record(data, "roles", "role_id", "R_FIN")["system_id"] = "CODE-HUB"
+    _record(data, "accounts", "account_id", "A006")["system_id"] = "CODE-HUB"
+    findings = evaluate(data)
+
+    for entitlement_id in ("EN003", "EN006"):
+        item = next(
+            finding for finding in findings
+            if finding["issue_code"] == "entitlement_system_mismatch"
+            and finding["entity_id"] == entitlement_id
+        )
+        assert item["classification"] == "manual_review"
+        assert f"entitlements:{entitlement_id}" in item["evidence_ids"]
+        assert f"accounts:A{entitlement_id[2:]}" in item["evidence_ids"]
+    assert not _has(findings, "transfer_old_role_retained", "EN003")
+    assert not _has(findings, "privileged_review_overdue", "EN006")
+    assert not _has(findings, "privileged_approval_missing", "EN006")
+
+
+def test_cross_system_entitlement_with_unknown_grant_time_is_still_reviewable():
+    data = deepcopy(generate_demo_data())
+    _record(data, "roles", "role_id", "R_FIN")["system_id"] = "CODE-HUB"
+    _record(data, "entitlements", "entitlement_id", "EN003")["granted_at"] = ""
+    assert _has(evaluate(data), "entitlement_system_mismatch", "EN003")
+
+
 def test_missing_role_owner_department_needs_transfer_review():
     data = deepcopy(generate_demo_data())
     _record(data, "roles", "role_id", "R_FIN")["owner_department"] = None

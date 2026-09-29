@@ -24,7 +24,7 @@ RULES: dict[str, dict[str, Any]] = {
             "roles.owner_department",
         ],
         "logic": "离职后48小时内停用账号；转岗后5×24小时内撤销原部门专属角色。所有时间均为UTC，等于期限视为按时。",
-        "exceptions": "共享角色（owner_department=GLOBAL）不视为原部门权限；来源缺少人事事件时间、原部门、角色归属、授权时间或事件关联不到账号时列为待人工判断。期限恰在审计截止日届满时纳入测试。",
+        "exceptions": "共享角色（owner_department=GLOBAL）不视为原部门权限；账号与角色所属系统不一致时先核实关联关系，不据此认定旧权限未撤销。来源缺少人事事件时间、原部门、角色归属、授权时间或事件关联不到账号时列为待人工判断。期限恰在审计截止日届满时纳入测试。",
         "limitations": "账号停用时间及角色归属来自模拟抽取；关联不到账号不等于员工确实没有账号，也无法判断企业批准的延长期或系统外补偿控制。",
         "threshold": "offboarding=48 hours; transfer=5 days",
     },
@@ -32,13 +32,14 @@ RULES: dict[str, dict[str, Any]] = {
         "name": "高权限审批与周期复核",
         "control_goal": "高权限在授予前获有效批准，并在规定期限内完成权限复核。",
         "inputs": [
-            "roles.is_privileged", "entitlements.request_id/granted_at/revoked_at",
+            "accounts.system_id", "roles.system_id/is_privileged",
+            "entitlements.request_id/granted_at/revoked_at",
             "access_requests.account_id/role_id/submitted_at",
             "access_approvals.decision/decided_at/valid_until",
             "access_reviews.period_end/due_at/completed_at",
         ],
         "logic": "批准必须关联同一账号和角色、决定为APPROVED，且申请时间不晚于批准时间、批准时间不晚于授予时间、有效期不早于授予。复核完成时间不得晚于due_at。",
-        "exceptions": "审批检查截止日前全部高权限授予；复核只检查到期时仍有效的授权。授予、申请或批准时间缺失且其余批准证据相符时列为人工核实；复核期限缺失或有效授权无复核记录也列为人工核实。未到复核到期日不判逾期。职责冲突由CT-03单独检测。",
+        "exceptions": "审批检查截止日前全部高权限授予；复核只检查到期时仍有效的授权。账号与角色所属系统不一致时单列资料缺口，暂不判断批准或复核。授予、申请或批准时间缺失且其余批准证据相符时列为人工核实；复核期限缺失或有效授权无复核记录也列为人工核实。未到复核到期日不判逾期。职责冲突由CT-03单独检测。",
         "limitations": "本测试依赖账号、角色、审批和复核导出完整性；授权关联不到账号或角色是证据缺口，最终定性仍需核对原系统。",
         "threshold": "approval <= grant; review completion <= due_at",
     },
@@ -259,7 +260,8 @@ def evaluate(data: dict[str, list[dict]]) -> list[dict[str, Any]]:
             for entitlement in data["entitlements"]:
                 account = accounts_by_id.get(entitlement["account_id"])
                 role = roles.get(entitlement["role_id"])
-                if not account or not role or account["employee_id"] != event["employee_id"]:
+                if (not account or not role or account["employee_id"] != event["employee_id"]
+                        or account["system_id"] != role["system_id"]):
                     continue
                 if role["owner_department"] is not None and role["owner_department"] in {
                     "GLOBAL", event["to_department"]
@@ -330,11 +332,26 @@ def evaluate(data: dict[str, list[dict]]) -> list[dict[str, Any]]:
     # CT-02: test historical grant approvals and reviews due while access was active.
     for entitlement in data["entitlements"]:
         role = roles.get(entitlement["role_id"])
+        account = accounts_by_id.get(entitlement["account_id"])
         granted = parse_utc(entitlement["granted_at"])
+        if granted is not None and granted > cutoff:
+            continue
+        if account is not None and role is not None and account["system_id"] != role["system_id"]:
+            findings.append(_finding(
+                "CT-02", "entitlement_system_mismatch", "授权账号与角色所属系统不一致",
+                "manual_review", "medium", account["system_id"],
+                entitlement["granted_at"] if granted is not None else "UNKNOWN",
+                "entitlement", entitlement["entitlement_id"],
+                "授权指向的账号与角色来自不同系统，需核实关联键和源记录。",
+                f"授权 {entitlement['entitlement_id']} 关联账号 "
+                f"{account['account_id']}（{account['system_id']}）与角色 "
+                f"{role['role_id']}（{role['system_id']}）；在核实映射前不据此判断审批或复核。",
+                [("entitlements", entitlement), ("accounts", account), ("roles", role)],
+            ))
+            continue
         if granted is None:
             if role is not None and not role["is_privileged"]:
                 continue
-            account = accounts_by_id.get(entitlement["account_id"])
             findings.append(_finding(
                 "CT-02", "entitlement_grant_time_unknown", "授权生效时间缺失",
                 "manual_review", "medium", account["system_id"] if account else "UNKNOWN",
@@ -345,9 +362,6 @@ def evaluate(data: dict[str, list[dict]]) -> list[dict[str, Any]]:
                 [("entitlements", entitlement), ("accounts", account), ("roles", role)],
             ))
             continue
-        if granted > cutoff:
-            continue
-        account = accounts_by_id.get(entitlement["account_id"])
         if role is None or account is None:
             missing = "、".join(
                 label for record, label in ((account, "账号"), (role, "角色"))
