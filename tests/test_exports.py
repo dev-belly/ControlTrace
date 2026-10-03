@@ -9,10 +9,37 @@ import zipfile
 
 import pytest
 
+from controltrace.cli import main
 from controltrace.exports import _json, exception_csv, workpaper_zip
 from controltrace.rules import run_tests
 from controltrace.store import get_finding, get_table_rows, initialize_db, save_review
 from controltrace.verify import BundleVerificationError, verify_bundle
+
+
+@pytest.mark.parametrize("payload", ["[]", "null", "42", '"not a manifest"'])
+def test_invalid_manifest_shape_returns_a_cli_error(tmp_path, capsys, payload):
+    path = tmp_path / "invalid-manifest.zip"
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("manifest.json", payload)
+    assert main(["verify", "--bundle", str(path)]) == 1
+    assert "Manifest must be a JSON object" in capsys.readouterr().err
+
+
+def test_verifier_rejects_duplicate_json_keys(tmp_path):
+    path = tmp_path / "duplicate-key.zip"
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("manifest.json", '{"bundle_format_version":2,"bundle_format_version":2}')
+    with pytest.raises(BundleVerificationError, match="Duplicate JSON key"):
+        verify_bundle(path)
+
+
+@pytest.mark.parametrize("value", ["NaN", "Infinity", "-Infinity", "1e9999"])
+def test_verifier_rejects_nonfinite_json_numbers(tmp_path, value):
+    path = tmp_path / "nonfinite.zip"
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("manifest.json", '{"bundle_format_version":' + value + '}')
+    with pytest.raises(BundleVerificationError, match="Non-finite JSON number"):
+        verify_bundle(path)
 
 
 def test_workpaper_bundle_links_evidence_and_verifies_source_hashes(tmp_path):
@@ -117,6 +144,20 @@ def _rewrite_bundle_with_updated_hashes(original, path, member, replacement):
     with zipfile.ZipFile(path, "w") as target:
         for name, content in files.items():
             target.writestr(name, content)
+
+
+@pytest.mark.parametrize("row", [None, [], 42, "not an account"])
+def test_invalid_source_row_returns_a_cli_error_after_rehashing(tmp_path, capsys, row):
+    db_path = tmp_path / "demo.duckdb"
+    initialize_db(db_path)
+    run_tests(db_path)
+    path = tmp_path / "invalid-source-row.zip"
+    _rewrite_bundle_with_updated_hashes(
+        workpaper_zip(db_path), path, "source_tables/accounts.json",
+        lambda content: _json([row]).encode("utf-8"),
+    )
+    assert main(["verify", "--bundle", str(path)]) == 1
+    assert "Source JSON rows must be objects: accounts" in capsys.readouterr().err
 
 
 def test_verifier_rejects_changed_workpaper_with_rehashed_manifest(tmp_path):

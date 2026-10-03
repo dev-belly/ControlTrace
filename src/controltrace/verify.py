@@ -6,6 +6,7 @@ import csv
 import hashlib
 import io
 import json
+import math
 import zipfile
 from pathlib import Path
 from typing import Any
@@ -25,13 +26,38 @@ def _require(condition: bool, message: str) -> None:
         raise BundleVerificationError(message)
 
 
+def _read_json(archive: zipfile.ZipFile, name: str) -> Any:
+    """Read unambiguous, finite JSON before inspecting the bundle's schema."""
+
+    def unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in pairs:
+            _require(key not in result, f"Duplicate JSON key in {name}: {key}")
+            result[key] = value
+        return result
+
+    def finite_number(value: str) -> float:
+        number = float(value)
+        _require(math.isfinite(number), f"Non-finite JSON number in {name}")
+        return number
+
+    try:
+        return json.loads(
+            archive.read(name), object_pairs_hook=unique_object,
+            parse_float=finite_number, parse_constant=finite_number,
+        )
+    except (json.JSONDecodeError, UnicodeDecodeError) as error:
+        raise BundleVerificationError(f"Invalid JSON in {name}: {error}") from error
+
+
 def verify_bundle(path: str | Path) -> dict[str, Any]:
     """Verify file hashes and replay the current rules against bundled source JSON."""
     with zipfile.ZipFile(path) as archive:
         names = archive.namelist()
         _require(len(names) == len(set(names)), "Bundle contains duplicate file names")
         _require("manifest.json" in names, "Bundle has no manifest.json")
-        manifest = json.loads(archive.read("manifest.json"))
+        manifest = _read_json(archive, "manifest.json")
+        _require(isinstance(manifest, dict), "Manifest must be a JSON object")
         _require(manifest.get("bundle_format_version") == 2,
                  "Unsupported bundle format; export again with this ControlTrace version")
         expected_files = manifest.get("files_sha256")
@@ -58,14 +84,16 @@ def verify_bundle(path: str | Path) -> dict[str, Any]:
                  "Bundle cutoff does not match the current control rules")
         _require(manifest.get("controltrace_version") == __version__,
                  "Bundle was created by a different ControlTrace version")
-        _require(json.loads(archive.read("rules.json")) == RULES,
+        _require(_read_json(archive, "rules.json") == RULES,
                  "Rule catalog differs from the installed ControlTrace version")
         _require("reviews.json" in expected_files, "Bundle has no review history")
 
         source_rows = {}
         for table in SOURCE_TABLES:
-            rows = json.loads(archive.read(f"source_tables/{table}.json"))
+            rows = _read_json(archive, f"source_tables/{table}.json")
             _require(isinstance(rows, list), f"Invalid source JSON: {table}")
+            _require(all(isinstance(row, dict) for row in rows),
+                     f"Source JSON rows must be objects: {table}")
             _require(archive.read(f"source_tables/{table}.csv") == _csv_bytes(rows),
                      f"Source CSV differs from JSON: {table}")
             source_rows[table] = rows
@@ -88,7 +116,7 @@ def verify_bundle(path: str | Path) -> dict[str, Any]:
         _require([row["finding_id"] for row in rows] == selected_ids,
                  "Findings CSV disagrees with manifest")
         replay_by_id = {finding["finding_id"]: finding for finding in replayed}
-        histories = json.loads(archive.read("reviews.json"))
+        histories = _read_json(archive, "reviews.json")
         _require(isinstance(histories, dict) and set(histories) == set(selected_ids),
                  "Review history does not match selected findings")
         selected_findings = []
