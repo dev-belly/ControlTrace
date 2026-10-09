@@ -66,6 +66,8 @@ uv run controltrace verify     # 校验 ZIP 文件哈希，并从包内源数据
 
 底稿 JSON 会先经过结构校验：清单必须是对象、源表必须是对象行数组，重复键与 `NaN`/`Infinity` 等非有限数值会被拒绝。非法输入由 `verify` 返回错误说明和退出码 1，避免把解析歧义带入后续重放。
 
+复核历史按解析后的 UTC 时间排列，保留小数秒精度；时间相同则按稳定复核 ID 排序，因此补录较早的记录不会替换较晚的结论。`verify` 同时检查每条复核的字段、复核人、时间、状态与结论：`pending` 不能带结论，`in_review` 可不填结论或标记待补证，`closed` 必须有最终结论和说明。即使文件哈希及 CSV、底稿内容相互一致，非法复核或逆序历史也会被拒绝。此检查仍不能证明复核人的身份或原始材料真实性。升级到新版本后，请重新导出旧版本底稿。
+
 ## 数据字典与案例
 
 - [数据字典](docs/DATA_DICTIONARY.md)：各源表、主键、关联键、时间和来源字段。
@@ -85,7 +87,7 @@ python -m ruff check src tests
 python -m pytest -q
 ```
 
-**本机验证（2026-10-03）：** `python -m ruff check src tests` 与 `python -m pytest -q` 均通过，**59 passed**；测试覆盖日期边界、重复源事件、非默认种子、缺失关联、跨系统账号与角色关联、关键时间缺失、复核状态、界面筛选、导出校验及重放，还会拒绝包内哈希已更新但内容互相矛盾的底稿，以及 JSON 类型错误、重复键和非有限数值。此前还实际检查了一条命令启动 Streamlit、异常行选择、D002 的时间线、复核保存以及 CSV/ZIP 导出。合成数据产生 12 条预置线索（9 条按演示口径命中，3 条待人工判断），并与 `expected_results` 完全对应。[GitHub Actions CI](https://github.com/dev-belly/ControlTrace/actions/workflows/ci.yml) 在 Python 3.11 和 3.12 上运行相同的检查。
+**本机验证（2026-10-09，Python 3.12）：** 全部 pytest 用例分两批通过（存储与导出 37 项，规则、CLI 与界面 35 项），合计 **72 passed**；Ruff 与 `git diff --check` 也通过。测试覆盖日期边界、重复源事件、非默认种子、缺失关联、跨系统账号与角色关联、关键时间缺失、复核状态、界面筛选、导出校验及重放；新增回归覆盖同一秒内的小数秒顺序、历史补录、最新结论导出，以及哈希和渲染内容一致时仍须拒绝的非法复核及逆序历史。此前还实际检查了一条命令启动 Streamlit、异常行选择、D002 的时间线、复核保存以及 CSV/ZIP 导出。合成数据仍产生 12 条预置线索（9 条按演示口径命中，3 条待人工判断），并与 `expected_results` 完全对应。[GitHub Actions CI](https://github.com/dev-belly/ControlTrace/actions/workflows/ci.yml) 在 Python 3.11 和 3.12 上运行完整的 Ruff 与 pytest 检查。
 
 ## 已知局限
 

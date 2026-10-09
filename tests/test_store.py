@@ -5,7 +5,13 @@ from __future__ import annotations
 import pytest
 
 from controltrace.rules import run_tests
-from controltrace.store import get_table_rows, initialize_db, list_findings, save_review
+from controltrace.store import (
+    get_finding,
+    get_table_rows,
+    initialize_db,
+    list_findings,
+    save_review,
+)
 
 
 def test_repeat_generation_and_tests_preserve_review_and_source_snapshot(tmp_path):
@@ -87,3 +93,29 @@ def test_review_state_and_timezone_preserve_an_unambiguous_latest_decision(tmp_p
     assert first["reviewed_at"] == "2026-09-27T10:00:00Z"
     assert get_table_rows(db_path, "reviews") == [first, second]
     assert list_findings(db_path)[0]["latest_review"] == second
+
+
+@pytest.mark.parametrize("write_order", [(0, 1, 2), (2, 0, 1)])
+def test_latest_review_uses_actual_time_with_fractional_seconds_and_backfill(tmp_path, write_order):
+    db_path = tmp_path / "case.duckdb"
+    initialize_db(db_path)
+    finding_id = run_tests(db_path)[0]["finding_id"]
+    timestamps = [
+        "2026-10-09T08:00:00+08:00",
+        "2026-10-09T00:00:00.100000Z",
+        "2026-10-09T00:00:00.500000Z",
+    ]
+    reviews = {}
+    for position in write_order:
+        reviews[position] = save_review(
+            db_path, finding_id, f"Reviewer {position}",
+            "closed" if position == 2 else "in_review",
+            "false_positive" if position == 2 else "needs_more_evidence",
+            "Documented review basis", timestamps[position],
+        )
+    expected_history = [reviews[position] for position in range(3)]
+    assert get_table_rows(db_path, "reviews") == expected_history
+    for finding in (get_finding(db_path, finding_id), list_findings(db_path)[0]):
+        assert finding["review_history"] == expected_history
+        assert finding["latest_review"] == reviews[2]
+        assert finding["review_status"] == "closed"
