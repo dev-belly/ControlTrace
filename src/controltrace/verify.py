@@ -14,6 +14,7 @@ from typing import Any
 from controltrace import __version__
 from controltrace.data import DEMO_CUTOFF, SOURCE_TABLES
 from controltrace.exports import _csv_bytes, _json, exception_csv, finding_workpaper
+from controltrace.reviews import REVIEW_FIELDS, validate_review_decision
 from controltrace.rules import RULES, evaluate
 
 
@@ -124,13 +125,29 @@ def verify_bundle(path: str | Path) -> dict[str, Any]:
         for finding_id in selected_ids:
             history = histories[finding_id]
             _require(isinstance(history, list), f"Invalid review history for {finding_id}")
+            order_keys = []
             for review in history:
                 _require(isinstance(review, dict) and review.get("finding_id") == finding_id,
                          f"Review belongs to another finding: {finding_id}")
+                _require(set(review) == REVIEW_FIELDS,
+                         f"Invalid review fields for {finding_id}")
                 review_id = review.get("review_id")
-                _require(isinstance(review_id, str) and review_id not in review_ids,
+                _require(isinstance(review_id, str) and bool(review_id.strip())
+                         and review_id not in review_ids,
                          f"Duplicate or invalid review ID: {finding_id}")
                 review_ids.add(review_id)
+                try:
+                    reviewed_time = validate_review_decision(
+                        review["reviewer"], review["status"], review["conclusion"],
+                        review["notes"], review["reviewed_at"],
+                    )
+                except ValueError as error:
+                    raise BundleVerificationError(
+                        f"Invalid review for {finding_id}: {error}"
+                    ) from error
+                order_keys.append((reviewed_time, review_id))
+            _require(order_keys == sorted(order_keys),
+                     f"Review history is not in chronological order: {finding_id}")
             finding = {
                 **replay_by_id[finding_id],
                 "review_history": history,

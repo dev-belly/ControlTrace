@@ -17,13 +17,14 @@ from controltrace.data import (
     SYNTHETIC_NOTICE,
     TABLE_SCHEMAS,
     generate_demo_data,
-    parse_utc,
 )
+from controltrace.reviews import REVIEW_CONCLUSIONS as REVIEW_CONCLUSIONS
+from controltrace.reviews import REVIEW_STATUSES as REVIEW_STATUSES
+from controltrace.reviews import validate_review_decision
 
 _OTHER_TABLES = ("meta", "findings", "reviews")
 ALL_TABLES = SOURCE_TABLES + _OTHER_TABLES
-REVIEW_STATUSES = ("pending", "in_review", "closed")
-REVIEW_CONCLUSIONS = ("confirmed_exception", "false_positive", "needs_more_evidence")
+_REVIEW_ORDER_BY = "CAST(reviewed_at AS TIMESTAMPTZ), review_id"
 
 
 def _connect(path: str | Path) -> duckdb.DuckDBPyConnection:
@@ -117,7 +118,7 @@ def get_table_rows(path: str | Path, table: str) -> list[dict]:
         raise ValueError(f"Unknown table: {table}")
     order_key = PRIMARY_KEYS.get(table, {"meta": "key", "findings": "finding_id"}.get(table))
     order_by = (
-        f' ORDER BY "{order_key}"' if order_key else ' ORDER BY "reviewed_at", "review_id"'
+        f' ORDER BY "{order_key}"' if order_key else f" ORDER BY {_REVIEW_ORDER_BY}"
     )
     con = _connect(path)
     try:
@@ -203,7 +204,7 @@ def _review_history(con: duckdb.DuckDBPyConnection, finding_ids: list[str]) -> d
     placeholders = ", ".join("?" for _ in finding_ids)
     records = _rows(con.execute(
         f"SELECT * FROM reviews WHERE finding_id IN ({placeholders}) "
-        "ORDER BY reviewed_at, review_id", finding_ids
+        f"ORDER BY {_REVIEW_ORDER_BY}", finding_ids
     ))
     history: dict[str, list[dict]] = {}
     for record in records:
@@ -262,28 +263,9 @@ def save_review(
     reviewed_at: str | None = None,
 ) -> dict:
     """Append an analyst decision; never rewrite earlier reviews or source evidence."""
-    if not reviewer.strip():
-        raise ValueError("Reviewer is required")
-    if status not in REVIEW_STATUSES:
-        raise ValueError(f"Status must be one of {REVIEW_STATUSES}")
-    if conclusion is not None and conclusion not in REVIEW_CONCLUSIONS:
-        raise ValueError(f"Conclusion must be one of {REVIEW_CONCLUSIONS}")
-    if status == "pending" and conclusion is not None:
-        raise ValueError("A pending review cannot have a conclusion")
-    if status == "in_review" and conclusion not in (None, "needs_more_evidence"):
-        raise ValueError("An in-progress review cannot have a final conclusion")
-    if status == "closed" and conclusion not in ("confirmed_exception", "false_positive"):
-        raise ValueError("A closed review requires a final conclusion")
-    if status == "closed" and not notes.strip():
-        raise ValueError("A closed review requires notes explaining the conclusion")
     if reviewed_at is None:
         reviewed_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-    try:
-        reviewed_time = parse_utc(reviewed_at)
-    except (TypeError, ValueError) as error:
-        raise ValueError("reviewed_at must be an ISO-8601 timestamp") from error
-    if reviewed_time is None:
-        raise ValueError("reviewed_at must be an ISO-8601 timestamp")
+    reviewed_time = validate_review_decision(reviewer, status, conclusion, notes, reviewed_at)
     reviewed_at = reviewed_time.isoformat().replace("+00:00", "Z")
     con = _connect(path)
     try:

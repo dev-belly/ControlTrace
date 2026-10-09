@@ -10,7 +10,7 @@ import zipfile
 import pytest
 
 from controltrace.cli import main
-from controltrace.exports import _json, exception_csv, workpaper_zip
+from controltrace.exports import _json, exception_csv, finding_workpaper, workpaper_zip
 from controltrace.rules import run_tests
 from controltrace.store import get_finding, get_table_rows, initialize_db, save_review
 from controltrace.verify import BundleVerificationError, verify_bundle
@@ -212,3 +212,87 @@ def test_filtered_workpaper_export_rejects_unknown_finding_ids(tmp_path):
     run_tests(db_path)
     with pytest.raises(ValueError, match="Unknown finding IDs"):
         workpaper_zip(db_path, {"F-NO-SUCH-CASE"})
+
+
+@pytest.fixture
+def reviewed_bundle(tmp_path):
+    db_path = tmp_path / "reviewed.duckdb"
+    initialize_db(db_path)
+    finding_id = run_tests(db_path)[0]["finding_id"]
+    save_review(
+        db_path, finding_id, "Reviewer A", "in_review", "needs_more_evidence",
+        "Checking source", "2026-10-09T00:00:00Z",
+    )
+    save_review(
+        db_path, finding_id, "Reviewer B", "closed", "false_positive",
+        "Confirmed allowed exception", "2026-10-09T00:00:00.500000Z",
+    )
+    return workpaper_zip(db_path, {finding_id}), get_finding(db_path, finding_id)
+
+
+def _rewrite_consistent_review_bundle(original, path, finding, history):
+    """Keep hashes and renderings consistent so semantic validation is exercised."""
+    with zipfile.ZipFile(io.BytesIO(original)) as source:
+        files = {name: source.read(name) for name in source.namelist()}
+    manifest = json.loads(files["manifest.json"])
+    finding = {**finding, "review_history": history, "latest_review": history[-1]}
+    finding_id = finding["finding_id"]
+    files["reviews.json"] = _json({finding_id: history}).encode("utf-8")
+    files["findings.csv"] = exception_csv([finding])
+    files[f"workpapers/{finding_id}.md"] = finding_workpaper(
+        finding, manifest["dataset_sha256"]
+    ).encode("utf-8")
+    manifest["files_sha256"] = {
+        name: hashlib.sha256(content).hexdigest()
+        for name, content in files.items() if name != "manifest.json"
+    }
+    files["manifest.json"] = _json(manifest).encode("utf-8")
+    with zipfile.ZipFile(path, "w") as target:
+        for name, content in files.items():
+            target.writestr(name, content)
+
+
+def test_export_selects_the_chronologically_latest_review(reviewed_bundle, tmp_path):
+    bundle, finding = reviewed_bundle
+    path = tmp_path / "valid-reviews.zip"
+    path.write_bytes(bundle)
+    assert verify_bundle(path)["exported_findings"] == 1
+    with zipfile.ZipFile(io.BytesIO(bundle)) as archive:
+        history = json.loads(archive.read("reviews.json"))[finding["finding_id"]]
+        assert [review["reviewer"] for review in history] == ["Reviewer A", "Reviewer B"]
+        assert "Reviewer B" in archive.read("findings.csv").decode("utf-8-sig")
+
+
+@pytest.mark.parametrize(
+    "changes, message",
+    [
+        ({"status": "not-a-status"}, "Status must be one of"),
+        ({"status": "pending"}, "pending review cannot have a conclusion"),
+        ({"status": "in_review"}, "in-progress review cannot have a final conclusion"),
+        ({"conclusion": "needs_more_evidence"}, "closed review requires a final conclusion"),
+        ({"notes": "   "}, "closed review requires notes"),
+        ({"reviewer": "   "}, "Reviewer is required"),
+        ({"reviewed_at": "not-a-time"}, "reviewed_at must be an ISO-8601 timestamp"),
+        ({"reviewed_at": []}, "reviewed_at must be an ISO-8601 timestamp"),
+        ({"notes": 42}, "Notes must be a string"),
+    ],
+)
+def test_verifier_rejects_invalid_review_even_when_hashes_and_outputs_agree(
+    reviewed_bundle, tmp_path, changes, message,
+):
+    bundle, finding = reviewed_bundle
+    history = [dict(review) for review in finding["review_history"]]
+    history[-1].update(changes)
+    path = tmp_path / "invalid-review.zip"
+    _rewrite_consistent_review_bundle(bundle, path, finding, history)
+    with pytest.raises(BundleVerificationError, match=message):
+        verify_bundle(path)
+
+
+def test_verifier_rejects_reordered_history_even_when_outputs_agree(reviewed_bundle, tmp_path):
+    bundle, finding = reviewed_bundle
+    history = list(reversed(finding["review_history"]))
+    path = tmp_path / "reordered-reviews.zip"
+    _rewrite_consistent_review_bundle(bundle, path, finding, history)
+    with pytest.raises(BundleVerificationError, match="Review history is not in chronological order"):
+        verify_bundle(path)
