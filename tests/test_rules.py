@@ -318,6 +318,36 @@ def test_events_after_audit_cutoff_are_not_tested():
     assert not _has(findings, "sensitive_self_approval", "Q007")
 
 
+@pytest.mark.parametrize(
+    ("account_id", "event_id", "exception_code", "gap_code"),
+    [
+        ("A001", "TERM-001", "terminated_account_open", "termination_account_extract_missing"),
+        ("A003", "MOVE-003", "transfer_old_role_retained", "transfer_account_extract_missing"),
+    ],
+)
+def test_accounts_created_after_cutoff_do_not_enter_lifecycle_population(
+    account_id, event_id, exception_code, gap_code
+):
+    data = deepcopy(generate_demo_data())
+    account = _record(data, "accounts", "account_id", account_id)
+    # This +08:00 value is one second after the UTC cutoff.
+    account["created_at"] = "2025-07-01T08:00:00+08:00"
+    findings = evaluate(data)
+    assert not any(item["issue_code"] == exception_code and item["control_id"] == "CT-01"
+                   and f"accounts:{account_id}" in item["evidence_ids"]
+                   for item in findings)
+    gap = next(item for item in findings if item["issue_code"] == gap_code
+               and item["entity_id"] == event_id)
+    assert gap["classification"] == "manual_review"
+    assert f"accounts:{account_id}" not in gap["evidence_ids"]
+
+    # The cutoff itself is inclusive and the original source evidence is retained.
+    account["created_at"] = "2025-07-01T07:59:59+08:00"
+    assert any(item["issue_code"] == exception_code
+               and f"accounts:{account_id}" in item["evidence_ids"]
+               for item in evaluate(data))
+
+
 def test_revoked_privilege_still_requires_original_approval():
     data = deepcopy(generate_demo_data())
     _record(data, "entitlements", "entitlement_id", "EN005")["revoked_at"] = (

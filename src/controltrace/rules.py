@@ -24,7 +24,7 @@ RULES: dict[str, dict[str, Any]] = {
             "roles.owner_department",
         ],
         "logic": "离职后48小时内停用账号；转岗后5×24小时内撤销原部门专属角色。所有时间均为UTC，等于期限视为按时。",
-        "exceptions": "共享角色（owner_department=GLOBAL）不视为原部门权限；账号与角色所属系统不一致时先核实关联关系，不据此认定旧权限未撤销。来源缺少人事事件时间、原部门、角色归属、授权时间或事件关联不到账号时列为待人工判断。期限恰在审计截止日届满时纳入测试。",
+        "exceptions": "共享角色（owner_department=GLOBAL）不视为原部门权限；明确在截止日之后创建的账号不进入截止日账号总体。账号与角色所属系统不一致时先核实关联关系，不据此认定旧权限未撤销。来源缺少人事事件时间、原部门、角色归属、授权时间或事件关联不到截止日前账号时列为待人工判断。期限恰在审计截止日届满时纳入测试。",
         "limitations": "账号停用时间及角色归属来自模拟抽取；关联不到账号不等于员工确实没有账号，也无法判断企业批准的延长期或系统外补偿控制。",
         "threshold": "offboarding=48 hours; transfer=5 days",
     },
@@ -174,7 +174,11 @@ def evaluate(data: dict[str, list[dict]]) -> list[dict[str, Any]]:
     cutoff = parse_utc(DEMO_CUTOFF)
     assert cutoff is not None
     findings: list[dict[str, Any]] = []
-    accounts = data["accounts"]
+    accounts = [
+        account for account in data["accounts"]
+        if parse_utc(account["created_at"]) is None
+        or parse_utc(account["created_at"]) <= cutoff
+    ]
     roles = _index(data["roles"], "role_id")
     accounts_by_id = _index(accounts, "account_id")
     requests = _index(data["access_requests"], "request_id")
