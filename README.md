@@ -87,7 +87,7 @@ python -m ruff check src tests
 python -m pytest -q
 ```
 
-**本机验证（2026-10-09，Python 3.12）：** 全部 pytest 用例分两批通过（存储与导出 37 项，规则、CLI 与界面 35 项），合计 **72 passed**；Ruff 与 `git diff --check` 也通过。测试覆盖日期边界、重复源事件、非默认种子、缺失关联、跨系统账号与角色关联、关键时间缺失、复核状态、界面筛选、导出校验及重放；新增回归覆盖同一秒内的小数秒顺序、历史补录、最新结论导出，以及哈希和渲染内容一致时仍须拒绝的非法复核及逆序历史。此前还实际检查了一条命令启动 Streamlit、异常行选择、D002 的时间线、复核保存以及 CSV/ZIP 导出。合成数据仍产生 12 条预置线索（9 条按演示口径命中，3 条待人工判断），并与 `expected_results` 完全对应。[GitHub Actions CI](https://github.com/dev-belly/ControlTrace/actions/workflows/ci.yml) 在 Python 3.11 和 3.12 上运行完整的 Ruff 与 pytest 检查。
+**本机验证（2026-10-11，Windows / Python 3.12）：** 完整 pytest 为 **74 passed**，Ruff 与 git diff --check 通过；实际执行生成、规则测试、CSV/ZIP 导出及包内重放，仍有 12 条预置线索（9 条演示异常、3 条人工判断），验证 28 个源文件。新增回归确认截止日后创建的账号不造成离职/转岗误报，并覆盖 UTC 偏移及恰在截止时点创建的账号；缺少截止日前账号证据仍列为人工核实。既有测试覆盖日期边界、重复事件、非默认种子、缺失关联、复核时间和状态、界面筛选及重哈希后非法复核的拒绝。[GitHub Actions CI](https://github.com/dev-belly/ControlTrace/actions/workflows/ci.yml) 在 Ubuntu / Python 3.11、3.12 和 Windows / Python 3.12 运行完整 Ruff 与 pytest。规则版本为 0.2.7，旧版底稿应使用原版本校验，升级后重新导出。
 
 ## 已知局限
 
