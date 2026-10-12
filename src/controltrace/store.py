@@ -20,9 +20,9 @@ from controltrace.data import (
 )
 from controltrace.reviews import REVIEW_CONCLUSIONS as REVIEW_CONCLUSIONS
 from controltrace.reviews import REVIEW_STATUSES as REVIEW_STATUSES
-from controltrace.reviews import validate_review_decision
+from controltrace.reviews import bind_review_history, finding_fingerprint, validate_review_decision
 
-_OTHER_TABLES = ("meta", "findings", "reviews")
+_OTHER_TABLES = ("meta", "findings", "reviews", "review_evidence")
 ALL_TABLES = SOURCE_TABLES + _OTHER_TABLES
 _REVIEW_ORDER_BY = "CAST(reviewed_at AS TIMESTAMPTZ), review_id"
 
@@ -39,6 +39,27 @@ def _rows(cursor: duckdb.DuckDBPyConnection) -> list[dict]:
     return [dict(zip(names, values, strict=True)) for values in cursor.fetchall()]
 
 
+def _ensure_review_evidence(con: duckdb.DuckDBPyConnection) -> None:
+    # Do not backfill old decisions from today's finding: their original
+    # observation may have changed before this migration.
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS review_evidence (
+            review_id VARCHAR PRIMARY KEY,
+            finding_sha256 VARCHAR NOT NULL
+        )
+    """)
+    if con.execute(
+        "SELECT 1 FROM information_schema.tables WHERE table_name = 'findings'"
+    ).fetchone():
+        con.execute(
+            "ALTER TABLE findings ADD COLUMN IF NOT EXISTS review_write_revision BIGINT DEFAULT 0"
+        )
+
+
+def _review_bindings(con: duckdb.DuckDBPyConnection) -> dict[str, str]:
+    return dict(con.execute("SELECT review_id, finding_sha256 FROM review_evidence").fetchall())
+
+
 def initialize_db(path: str | Path, seed: int | None = None) -> None:
     """Initialize once. Rerunning with the same seed never resets review records.
 
@@ -48,6 +69,7 @@ def initialize_db(path: str | Path, seed: int | None = None) -> None:
     """
     con = _connect(path)
     try:
+        _ensure_review_evidence(con)
         con.execute("CREATE TABLE IF NOT EXISTS meta (key VARCHAR PRIMARY KEY, value VARCHAR NOT NULL)")
         prior = con.execute("SELECT value FROM meta WHERE key = 'seed'").fetchone()
         if prior:
@@ -85,7 +107,8 @@ def initialize_db(path: str | Path, seed: int | None = None) -> None:
                     entity_type VARCHAR NOT NULL,
                     entity_id VARCHAR NOT NULL,
                     payload_json VARCHAR NOT NULL,
-                    refreshed_at VARCHAR NOT NULL
+                    refreshed_at VARCHAR NOT NULL,
+                    review_write_revision BIGINT DEFAULT 0
                 )
             """)
             con.execute("""
@@ -116,7 +139,9 @@ def get_table_rows(path: str | Path, table: str) -> list[dict]:
     """Read a whitelisted table as JSON-serializable dictionaries."""
     if table not in ALL_TABLES:
         raise ValueError(f"Unknown table: {table}")
-    order_key = PRIMARY_KEYS.get(table, {"meta": "key", "findings": "finding_id"}.get(table))
+    order_key = PRIMARY_KEYS.get(table, {
+        "meta": "key", "findings": "finding_id", "review_evidence": "review_id",
+    }.get(table))
     order_by = (
         f' ORDER BY "{order_key}"' if order_key else f" ORDER BY {_REVIEW_ORDER_BY}"
     )
@@ -221,14 +246,12 @@ def list_findings(path: str | Path) -> list[dict]:
             "ORDER BY control_id, occurred_at, entity_id, issue_code"
         ))
         history = _review_history(con, [row["finding_id"] for row in raw])
+        bindings = _review_bindings(con)
         findings = []
         for row in raw:
             finding = json.loads(row["payload_json"])
             reviews = history.get(row["finding_id"], [])
-            finding["latest_review"] = reviews[-1] if reviews else None
-            finding["review_history"] = reviews
-            finding["review_status"] = reviews[-1]["status"] if reviews else "pending"
-            findings.append(finding)
+            findings.append(bind_review_history(finding, reviews, bindings))
         return findings
     finally:
         con.close()
@@ -245,10 +268,7 @@ def get_finding(path: str | Path, finding_id: str) -> dict | None:
             return None
         finding = json.loads(raw[0])
         reviews = _review_history(con, [finding_id]).get(finding_id, [])
-        finding["latest_review"] = reviews[-1] if reviews else None
-        finding["review_history"] = reviews
-        finding["review_status"] = reviews[-1]["status"] if reviews else "pending"
-        return finding
+        return bind_review_history(finding, reviews, _review_bindings(con))
     finally:
         con.close()
 
@@ -261,30 +281,61 @@ def save_review(
     conclusion: str | None = None,
     notes: str = "",
     reviewed_at: str | None = None,
+    *,
+    expected_revision: str | None = None,
 ) -> dict:
-    """Append an analyst decision; never rewrite earlier reviews or source evidence."""
+    """Append a decision bound to current evidence, optionally rejecting a stale form.
+
+    Callers editing a previously displayed finding should pass its
+    ``review_revision``. Validation and both inserts share one transaction.
+    """
     if reviewed_at is None:
         reviewed_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     reviewed_time = validate_review_decision(reviewer, status, conclusion, notes, reviewed_at)
     reviewed_at = reviewed_time.isoformat().replace("+00:00", "Z")
     con = _connect(path)
     try:
-        if con.execute(
-            "SELECT 1 FROM findings WHERE finding_id = ?", [finding_id]
-        ).fetchone() is None:
-            raise ValueError(f"Unknown finding: {finding_id}")
-        review = {
-            "review_id": f"REV-{uuid4().hex[:12].upper()}",
-            "finding_id": finding_id,
-            "reviewer": reviewer.strip(),
-            "reviewed_at": reviewed_at,
-            "status": status,
-            "conclusion": conclusion,
-            "notes": notes.strip(),
-        }
-        con.execute(
-            "INSERT INTO reviews VALUES (?, ?, ?, ?, ?, ?, ?)", list(review.values())
-        )
-        return review
+        con.execute("BEGIN TRANSACTION")
+        try:
+            raw = con.execute(
+                "SELECT payload_json FROM findings WHERE finding_id = ?", [finding_id]
+            ).fetchone()
+            if raw is None:
+                raise ValueError(f"Unknown finding: {finding_id}")
+            finding = json.loads(raw[0])
+            history = _review_history(con, [finding_id]).get(finding_id, [])
+            current = bind_review_history(finding, history, _review_bindings(con))
+            if expected_revision is not None and expected_revision != current["review_revision"]:
+                raise ValueError("Finding evidence or review changed; reload before saving")
+            # A real row update is essential: a no-op can be optimized away,
+            # allowing two snapshot readers to both pass the revision check.
+            con.execute(
+                "UPDATE findings SET review_write_revision = review_write_revision + 1 "
+                "WHERE finding_id = ?", [finding_id]
+            )
+            review = {
+                "review_id": f"REV-{uuid4().hex[:12].upper()}",
+                "finding_id": finding_id,
+                "reviewer": reviewer.strip(),
+                "reviewed_at": reviewed_at,
+                "status": status,
+                "conclusion": conclusion,
+                "notes": notes.strip(),
+            }
+            con.execute(
+                "INSERT INTO reviews VALUES (?, ?, ?, ?, ?, ?, ?)", list(review.values())
+            )
+            con.execute(
+                "INSERT INTO review_evidence VALUES (?, ?)",
+                [review["review_id"], finding_fingerprint(finding)],
+            )
+            con.execute("COMMIT")
+            return review
+        except duckdb.TransactionException as error:
+            con.execute("ROLLBACK")
+            raise ValueError("Finding evidence or review changed; reload before saving") from error
+        except Exception:
+            con.execute("ROLLBACK")
+            raise
     finally:
         con.close()

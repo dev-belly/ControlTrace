@@ -7,6 +7,7 @@ import hashlib
 import io
 import json
 import math
+import re
 import zipfile
 from pathlib import Path
 from typing import Any
@@ -14,7 +15,7 @@ from typing import Any
 from controltrace import __version__
 from controltrace.data import DEMO_CUTOFF, SOURCE_TABLES
 from controltrace.exports import _csv_bytes, _json, exception_csv, finding_workpaper
-from controltrace.reviews import REVIEW_FIELDS, validate_review_decision
+from controltrace.reviews import REVIEW_FIELDS, bind_review_history, validate_review_decision
 from controltrace.rules import RULES, evaluate
 
 
@@ -59,8 +60,10 @@ def verify_bundle(path: str | Path) -> dict[str, Any]:
         _require("manifest.json" in names, "Bundle has no manifest.json")
         manifest = _read_json(archive, "manifest.json")
         _require(isinstance(manifest, dict), "Manifest must be a JSON object")
-        _require(manifest.get("bundle_format_version") == 2,
+        bundle_format = manifest.get("bundle_format_version")
+        _require(bundle_format in (2, 3),
                  "Unsupported bundle format; export again with this ControlTrace version")
+        evidence_bound = bundle_format == 3
         expected_files = manifest.get("files_sha256")
         _require(isinstance(expected_files, dict), "Manifest has no complete file hash list")
         _require(set(expected_files) == set(names) - {"manifest.json"},
@@ -83,7 +86,8 @@ def verify_bundle(path: str | Path) -> dict[str, Any]:
                  "Dataset fingerprint does not match source hashes")
         _require(manifest.get("audit_cutoff") == DEMO_CUTOFF,
                  "Bundle cutoff does not match the current control rules")
-        _require(manifest.get("controltrace_version") == __version__,
+        bundle_version = manifest.get("controltrace_version")
+        _require(bundle_version == (__version__ if evidence_bound else "0.2.7"),
                  "Bundle was created by a different ControlTrace version")
         _require(_read_json(archive, "rules.json") == RULES,
                  "Rule catalog differs from the installed ControlTrace version")
@@ -120,6 +124,12 @@ def verify_bundle(path: str | Path) -> dict[str, Any]:
         histories = _read_json(archive, "reviews.json")
         _require(isinstance(histories, dict) and set(histories) == set(selected_ids),
                  "Review history does not match selected findings")
+        bindings = {}
+        if evidence_bound:
+            _require("review_evidence.json" in expected_files, "Bundle has no review evidence bindings")
+            bindings = _read_json(archive, "review_evidence.json")
+            _require(isinstance(bindings, dict) and set(bindings) == set(selected_ids),
+                     "Review evidence bindings do not match selected findings")
         selected_findings = []
         review_ids = set()
         for finding_id in selected_ids:
@@ -153,10 +163,22 @@ def verify_bundle(path: str | Path) -> dict[str, Any]:
                 "review_history": history,
                 "latest_review": history[-1] if history else None,
             }
+            if evidence_bound:
+                finding_bindings = bindings[finding_id]
+                _require(isinstance(finding_bindings, dict)
+                         and set(finding_bindings) == {item["review_id"] for item in history},
+                         f"Review evidence bindings do not match history: {finding_id}")
+                _require(all(value is None or isinstance(value, str)
+                             and re.fullmatch(r"[0-9a-f]{64}", value)
+                             for value in finding_bindings.values()),
+                         f"Invalid review evidence fingerprint: {finding_id}")
+                finding = bind_review_history(finding, history, finding_bindings)
             selected_findings.append(finding)
             workpaper_name = f"workpapers/{finding_id}.md"
             _require(workpaper_name in expected_files, f"Missing workpaper for {finding_id}")
-            _require(archive.read(workpaper_name) == finding_workpaper(finding, dataset_hash).encode("utf-8"),
+            _require(archive.read(workpaper_name) == finding_workpaper(
+                finding, dataset_hash, version=bundle_version,
+            ).encode("utf-8"),
                      f"Workpaper differs from replayed evidence or review: {finding_id}")
         _require(archive.read("findings.csv") == exception_csv(selected_findings),
                  "Findings CSV differs from replayed evidence or review")
@@ -167,4 +189,5 @@ def verify_bundle(path: str | Path) -> dict[str, Any]:
         "replayed_findings": len(all_ids),
         "exported_findings": len(selected_ids),
         "scope": scope,
+        "review_evidence_bound": evidence_bound,
     }

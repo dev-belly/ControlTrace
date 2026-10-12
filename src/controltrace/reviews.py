@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from datetime import datetime
 
 from controltrace.data import parse_utc
@@ -11,6 +13,42 @@ REVIEW_CONCLUSIONS = ("confirmed_exception", "false_positive", "needs_more_evide
 REVIEW_FIELDS = {
     "review_id", "finding_id", "reviewer", "reviewed_at", "status", "conclusion", "notes",
 }
+REVIEW_ANNOTATIONS = {
+    "latest_review", "review_history", "review_status", "review_bindings",
+    "evidence_sha256", "review_revision", "review_stale_count",
+}
+
+
+def finding_fingerprint(finding: dict) -> str:
+    """Identify the exact automated observation, rule and linked source values."""
+    payload = {key: value for key, value in finding.items() if key not in REVIEW_ANNOTATIONS}
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, allow_nan=False).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def bind_review_history(finding: dict, history: list[dict], bindings: dict) -> dict:
+    """Only a decision made on the current evidence can become the current verdict.
+
+    Unbound legacy reviews remain in history, but cannot claim to have assessed
+    the present evidence. Their original evidence is unknown.
+    """
+    fingerprint = finding_fingerprint(finding)
+    applicable = [item for item in history if bindings.get(item["review_id"]) == fingerprint]
+    latest = applicable[-1] if applicable else None
+    revision = hashlib.sha256(json.dumps({
+        "evidence": fingerprint,
+        "reviews": [(item["review_id"], bindings.get(item["review_id"])) for item in history],
+    }, sort_keys=True).encode("utf-8")).hexdigest()
+    return {
+        **finding,
+        "evidence_sha256": fingerprint,
+        "review_history": history,
+        "review_bindings": {item["review_id"]: bindings.get(item["review_id"]) for item in history},
+        "latest_review": latest,
+        "review_status": latest["status"] if latest else "pending",
+        "review_stale_count": len(history) - len(applicable),
+        "review_revision": revision,
+    }
 
 
 def validate_review_decision(
