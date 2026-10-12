@@ -4,7 +4,7 @@ from pathlib import Path
 
 from streamlit.testing.v1 import AppTest
 
-from controltrace.store import get_table_rows
+from controltrace.store import get_table_rows, list_findings, save_review
 
 APP_PATH = Path(__file__).parents[1] / "src" / "controltrace" / "app.py"
 
@@ -64,3 +64,24 @@ def test_filter_changes_reset_table_selection_without_crashing(tmp_path, monkeyp
     app.multiselect[0].set_value([]).run()
     assert not app.exception
     assert any("No observations match" in item.value for item in app.info)
+
+
+def test_stale_form_requires_explicit_reload_before_saving(tmp_path, monkeypatch):
+    db_path = tmp_path / "case.duckdb"
+    monkeypatch.setenv("CONTROLTRACE_DB", str(db_path))
+    app = AppTest.from_file(str(APP_PATH)).run(timeout=30)
+    app.text_input[0].set_value("Reviewer A").run()
+    app.text_area[0].set_value("Unsaved original form").run()
+    finding = list_findings(db_path)[0]
+    save_review(db_path, finding["finding_id"], "Reviewer B", notes="New current review")
+    app.run()
+    assert not app.exception
+    assert any("changed while you were editing" in item.value for item in app.warning)
+    save_button = next(button for button in app.button if button.label == "Save review")
+    assert save_button.disabled
+    assert len(get_table_rows(db_path, "reviews")) == 1
+    next(button for button in app.button if button.label == "Reload current finding").click().run()
+    assert not app.exception
+    assert app.text_input[0].value == "Reviewer B"
+    assert app.text_area[0].value == "New current review"
+    assert not next(button for button in app.button if button.label == "Save review").disabled

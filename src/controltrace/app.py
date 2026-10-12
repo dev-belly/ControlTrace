@@ -52,8 +52,7 @@ def _display(value: Any) -> str:
 
 
 def _load_findings() -> list[dict[str, Any]]:
-    if not DB_PATH.exists():
-        initialize_db(DB_PATH)
+    initialize_db(DB_PATH)
     findings = list_findings(DB_PATH)
     if not findings:
         run_tests(DB_PATH)
@@ -241,22 +240,38 @@ with right:
 
     st.subheader("Human review")
     current = selected.get("latest_review") or {}
+    if selected["review_stale_count"]:
+        st.warning(
+            f"{selected['review_stale_count']} historical review(s) concern different or unknown "
+            "evidence. Assess the current source records before recording a new decision."
+        )
     st.caption(
         f"Current: {current.get('status', 'pending')} · "
         f"{current.get('conclusion') or 'no conclusion'}"
     )
     finding_id = selected["finding_id"]
+    revision_key = f"review_base_{finding_id}"
+    if revision_key not in st.session_state:
+        st.session_state[revision_key] = selected["review_revision"]
+    base_revision = st.session_state[revision_key]
+    stale_form = base_revision != selected["review_revision"]
+    if stale_form:
+        st.warning("This finding's evidence or review changed while you were editing. Reload it.")
+        if st.button("Reload current finding", key=f"reload_{finding_id}"):
+            st.session_state[revision_key] = selected["review_revision"]
+            st.rerun()
+    input_key = f"{finding_id}_{base_revision}"
     reviewer = st.text_input(
         "Reviewer name or initials",
         value=current.get("reviewer", ""),
-        key=f"reviewer_{finding_id}",
+        key=f"reviewer_{input_key}",
     )
     status_options = ["pending", "in_review", "closed"]
     status = st.selectbox(
         "Processing status",
         status_options,
         index=status_options.index(current.get("status", "pending")),
-        key=f"review_status_{finding_id}",
+        key=f"review_status_{input_key}",
     )
     conclusion_options = {
         "pending": [None],
@@ -273,23 +288,27 @@ with right:
             else 0
         ),
         format_func=lambda value: value.replace("_", " ") if value else "No conclusion",
-        key=f"review_conclusion_{finding_id}_{status}",
+        key=f"review_conclusion_{input_key}_{status}",
     )
     notes = st.text_area(
         "Review notes / exception basis",
         value=current.get("notes", ""),
-        key=f"review_notes_{finding_id}",
+        key=f"review_notes_{input_key}",
     )
-    submitted = st.button("Save review", type="primary", width="stretch")
+    submitted = st.button("Save review", type="primary", width="stretch", disabled=stale_form)
     if submitted:
         if not reviewer.strip() or not notes.strip():
             st.error("Reviewer and notes are required to preserve a usable review trail.")
         else:
             try:
-                save_review(DB_PATH, finding_id, reviewer.strip(), status, conclusion, notes.strip())
+                save_review(
+                    DB_PATH, finding_id, reviewer.strip(), status, conclusion, notes.strip(),
+                    expected_revision=base_revision,
+                )
             except ValueError as error:
                 st.error(str(error))
             else:
+                del st.session_state[revision_key]
                 st.rerun()
     if selected.get("review_history"):
         with st.expander(f"Decision history ({len(selected['review_history'])})"):

@@ -51,6 +51,8 @@ def exception_csv(findings: list[dict[str, Any]]) -> bytes:
         "occurred_at", "audit_cutoff", "entity_type", "entity_id", "title", "summary", "rationale",
         "evidence_ids", "reviewer", "reviewed_at", "status", "conclusion", "notes",
     ]
+    if any("evidence_sha256" in finding for finding in findings):
+        fields += ["evidence_sha256", "review_stale_count"]
     rows = []
     for finding in findings:
         review = finding.get("latest_review") or {}
@@ -68,7 +70,9 @@ def exception_csv(findings: list[dict[str, Any]]) -> bytes:
     return _csv_bytes(rows, fields)
 
 
-def finding_workpaper(finding: dict[str, Any], dataset_sha256: str) -> str:
+def finding_workpaper(
+    finding: dict[str, Any], dataset_sha256: str, *, version: str = __version__,
+) -> str:
     """A self-contained trail from control objective to source evidence and human decision."""
     rule = finding.get("rule") or RULES[finding["control_id"]]
     review = finding.get("latest_review") or {}
@@ -79,7 +83,7 @@ def finding_workpaper(finding: dict[str, Any], dataset_sha256: str) -> str:
         "",
         f"- Audit cutoff: `{DEMO_CUTOFF}`",
         f"- Dataset SHA-256: `{dataset_sha256}`",
-        f"- ControlTrace version: `{__version__}`",
+        f"- ControlTrace version: `{version}`",
         f"- Control: `{finding['control_id']}` — {finding['title']}",
         f"- Classification: `{finding['classification']}`; risk: `{finding['risk']}`",
         f"- System: `{finding['system']}`; subject: `{finding['entity_type']}:{finding['entity_id']}`",
@@ -100,6 +104,8 @@ def finding_workpaper(finding: dict[str, Any], dataset_sha256: str) -> str:
         if isinstance(value, list):
             value = "; ".join(str(item) for item in value)
         lines.append(f"- **{label}:** {value}")
+    if "evidence_sha256" in finding:
+        lines.append(f"- Finding evidence SHA-256: `{finding['evidence_sha256']}`")
     lines += ["", "## Automated observation", "", finding["summary"], "", finding["rationale"]]
     lines += ["", "## Event timeline", ""]
     for event in finding.get("timeline", []):
@@ -121,6 +127,15 @@ def finding_workpaper(finding: dict[str, Any], dataset_sha256: str) -> str:
         "### Review history",
         "",
     ]
+    if "review_bindings" in finding:
+        lines += [
+            "Current decision applies only to this finding's evidence SHA-256. "
+            f"Historical decisions on different or unknown evidence: {finding['review_stale_count']}. "
+            "Their original source snapshots are not included in this bundle.",
+            "",
+            "    " + _json({"review_evidence_sha256": finding["review_bindings"]}),
+            "",
+        ]
     for item in finding.get("review_history", []):
         lines.append("    " + _json(item))
     lines += [
@@ -171,6 +186,9 @@ def workpaper_zip(db_path: str | Path, finding_ids: set[str] | None = None) -> b
         "reviews.json": _json({
             finding["finding_id"]: finding["review_history"] for finding in findings
         }).encode("utf-8"),
+        "review_evidence.json": _json({
+            finding["finding_id"]: finding["review_bindings"] for finding in findings
+        }).encode("utf-8"),
         "rules.json": _json(RULES).encode("utf-8"),
         "README.txt": (
             "Synthetic ControlTrace workpapers. Check manifest.json hashes before using "
@@ -189,7 +207,7 @@ def workpaper_zip(db_path: str | Path, finding_ids: set[str] | None = None) -> b
     })
     manifest = {
         "notice": "Synthetic case study; no real enterprise audit data",
-        "bundle_format_version": 2,
+        "bundle_format_version": 3,
         "audit_cutoff": DEMO_CUTOFF,
         "generator_seed": int(meta.get("seed", DEFAULT_SEED)),
         "controltrace_version": __version__,
