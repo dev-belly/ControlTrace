@@ -136,13 +136,13 @@ def _finding(
     for item in related:
         record = item["record"]
         for field, label, kind in _TIMELINE_FIELDS.get(item["table"], []):
-            if record.get(field):
+            if parse_utc(record.get(field)) is not None:
                 timeline.append({
                     "at": record[field], "event": label, "kind": kind,
                     "field": field, "evidence_id": item["id"],
                     "source_system": record["source_system"],
                 })
-    timeline.sort(key=lambda item: (item["at"], item["evidence_id"], item["field"]))
+    timeline.sort(key=lambda item: (parse_utc(item["at"]), item["evidence_id"], item["field"]))
     digest = hashlib.sha256(f"{control_id}|{issue_code}|{entity_id}".encode()).hexdigest()[:12]
     return {
         "finding_id": f"F-{digest.upper()}",

@@ -43,6 +43,29 @@ def test_fixture_manifest_matches_actual_rule_outcomes():
         assert finding["rule"]["control_goal"]
 
 
+@pytest.mark.parametrize(
+    ("approved_at", "tested_at", "deployed_at"),
+    [
+        ("2025-06-10T10:00:00Z", "2025-06-10T10:00:00.050000Z", "2025-06-10T10:00:00.100000Z"),
+        ("2025-06-10T11:00:00+01:00", "2025-06-10T10:00:01Z", "2025-06-10T06:00:02-04:00"),
+    ],
+)
+def test_evidence_timeline_orders_actual_instants_and_preserves_source_times(
+    approved_at, tested_at, deployed_at
+):
+    data = deepcopy(generate_demo_data())
+    deployment = _record(data, "deployments", "deployment_id", "D002")
+    deployment["deployed_at"] = deployed_at
+    ticket = _record(data, "change_tickets", "ticket_id", deployment["ticket_id"])
+    ticket.update(approved_at=approved_at, tested_at=tested_at)
+    finding = next(item for item in evaluate(data) if item["entity_id"] == "D002")
+
+    timeline = finding["timeline"]
+    instants = [parse_utc(item["at"]) for item in timeline]
+    assert instants == sorted(instants)
+    assert [item["at"] for item in timeline[:3]] == [approved_at, tested_at, deployed_at]
+
+
 def test_exact_deadline_is_on_time_for_each_time_based_control():
     data = deepcopy(generate_demo_data())
     _record(data, "accounts", "account_id", "A001")["disabled_at"] = "2025-06-12T09:00:00Z"
