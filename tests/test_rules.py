@@ -7,7 +7,7 @@ from copy import deepcopy
 import pytest
 
 from controltrace.data import generate_demo_data, parse_utc
-from controltrace.rules import evaluate
+from controltrace.rules import evaluate, evidence_timeline
 
 
 def _record(data, table, key, value):
@@ -59,11 +59,18 @@ def test_evidence_timeline_orders_actual_instants_and_preserves_source_times(
     ticket = _record(data, "change_tickets", "ticket_id", deployment["ticket_id"])
     ticket.update(approved_at=approved_at, tested_at=tested_at)
     finding = next(item for item in evaluate(data) if item["entity_id"] == "D002")
-
     timeline = finding["timeline"]
     instants = [parse_utc(item["at"]) for item in timeline]
     assert instants == sorted(instants)
     assert [item["at"] for item in timeline[:3]] == [approved_at, tested_at, deployed_at]
+
+
+def test_timeline_omits_unparseable_view_entries_without_rewriting_source():
+    record = {"submitted_at": "", "approved_at": "not-a-time", "tested_at": "2025-06-10T10:00:00Z",
+              "source_system": "synthetic"}
+    related = [{"table": "change_tickets", "id": "test", "record": record}]
+    assert [item["field"] for item in evidence_timeline(related)] == ["tested_at"]
+    assert record["approved_at"] == "not-a-time"
 
 
 def test_exact_deadline_is_on_time_for_each_time_based_control():

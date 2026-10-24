@@ -109,6 +109,32 @@ def _index(rows: list[dict], field: str) -> dict[str, dict]:
     return {row[field]: row for row in rows}
 
 
+def evidence_timeline(related: list[dict], *, legacy: bool = False) -> list[dict]:
+    """Preserve source timestamps while ordering the current view by UTC."""
+    timeline = []
+    for item in related:
+        record = item["record"]
+        for field, label, kind in _TIMELINE_FIELDS.get(item["table"], []):
+            value = record.get(field)
+            if legacy:
+                include = bool(value)
+            else:
+                try:
+                    include = parse_utc(value) is not None
+                except (ValueError, TypeError, AttributeError, OverflowError):
+                    include = False
+            if include:
+                timeline.append({
+                    "at": value, "event": label, "kind": kind,
+                    "field": field, "evidence_id": item["id"],
+                    "source_system": record["source_system"],
+                })
+    timeline.sort(key=lambda item: (
+        item["at"] if legacy else parse_utc(item["at"]), item["evidence_id"], item["field"],
+    ))
+    return timeline
+
+
 def _finding(
     control_id: str,
     issue_code: str,
@@ -132,17 +158,7 @@ def _finding(
         {"table": table, "id": str(record[PRIMARY_KEYS[table]]), "record": record.copy()}
         for table, record in unique.values()
     ]
-    timeline = []
-    for item in related:
-        record = item["record"]
-        for field, label, kind in _TIMELINE_FIELDS.get(item["table"], []):
-            if parse_utc(record.get(field)) is not None:
-                timeline.append({
-                    "at": record[field], "event": label, "kind": kind,
-                    "field": field, "evidence_id": item["id"],
-                    "source_system": record["source_system"],
-                })
-    timeline.sort(key=lambda item: (parse_utc(item["at"]), item["evidence_id"], item["field"]))
+    timeline = evidence_timeline(related)
     digest = hashlib.sha256(f"{control_id}|{issue_code}|{entity_id}".encode()).hexdigest()[:12]
     return {
         "finding_id": f"F-{digest.upper()}",
