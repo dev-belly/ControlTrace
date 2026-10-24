@@ -21,30 +21,40 @@ def _json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
 
 
-def _csv_bytes(rows: list[dict[str, Any]], fields: list[str] | None = None) -> bytes:
+def _csv_bytes(
+    rows: list[dict[str, Any]], fields: list[str] | None = None, *, legacy: bool = False,
+) -> bytes:
     fields = fields or sorted({key for row in rows for key in row})
     buffer = io.StringIO(newline="")
     writer = csv.DictWriter(buffer, fieldnames=fields, extrasaction="ignore")
-    writer.writeheader()
+    # Keep original mapping keys; the displayed header is also untrusted text.
+    writer.writerow({key: key if legacy else _csv_cell(key) for key in fields})
     for row in rows:
         writer.writerow(
             {
-                key: _csv_cell(value)
+                key: _csv_cell(value, legacy=legacy)
                 for key, value in row.items()
             }
         )
     return buffer.getvalue().encode("utf-8-sig")
 
 
-def _csv_cell(value: Any) -> Any:
+def _csv_cell(value: Any, *, legacy: bool = False) -> Any:
     if isinstance(value, (list, dict)):
         value = _json(value)
-    if isinstance(value, str) and value.lstrip().startswith(("=", "+", "-", "@")):
-        return "'" + value
+    if isinstance(value, str) and value:
+        if legacy:
+            # Formats 2/3 retain their exact historical bytes for replay only.
+            if value.lstrip().startswith(("=", "+", "-", "@")):
+                return "'" + value
+        elif (value.startswith("text: ") or ord(value[0]) < 32 or ord(value[0]) == 127
+              or value[0] == "\ufeff"
+              or value.lstrip().startswith(("=", "+", "-", "@", "＝", "＋", "－", "＠"))):
+            return "text: " + value
     return value
 
 
-def exception_csv(findings: list[dict[str, Any]]) -> bytes:
+def exception_csv(findings: list[dict[str, Any]], *, legacy: bool = False) -> bytes:
     """A flat list, including decisions, for review outside the app."""
     fields = [
         "finding_id", "control_id", "issue_code", "classification", "risk", "system",
@@ -67,7 +77,7 @@ def exception_csv(findings: list[dict[str, Any]]) -> bytes:
                 "notes": review.get("notes", ""),
             }
         )
-    return _csv_bytes(rows, fields)
+    return _csv_bytes(rows, fields, legacy=legacy)
 
 
 def finding_workpaper(
@@ -207,7 +217,7 @@ def workpaper_zip(db_path: str | Path, finding_ids: set[str] | None = None) -> b
     })
     manifest = {
         "notice": "Synthetic case study; no real enterprise audit data",
-        "bundle_format_version": 3,
+        "bundle_format_version": 4,
         "audit_cutoff": DEMO_CUTOFF,
         "generator_seed": int(meta.get("seed", DEFAULT_SEED)),
         "controltrace_version": __version__,
