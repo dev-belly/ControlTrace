@@ -93,7 +93,7 @@ def test_exception_csv_includes_cutoff_and_escapes_formula_notes(tmp_path):
     csv_text = exception_csv([reviewed]).decode("utf-8-sig")
     assert "audit_cutoff" in csv_text
     assert "Reviewer B" in csv_text
-    assert "'=HYPERLINK" in csv_text
+    assert "text: =HYPERLINK" in csv_text
 
 
 def test_workpaper_encodes_multiline_review_notes_as_data(tmp_path):
