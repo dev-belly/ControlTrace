@@ -217,7 +217,7 @@ def workpaper_zip(db_path: str | Path, finding_ids: set[str] | None = None) -> b
     })
     manifest = {
         "notice": "Synthetic case study; no real enterprise audit data",
-        "bundle_format_version": 4,
+        "bundle_format_version": 5,
         "audit_cutoff": DEMO_CUTOFF,
         "generator_seed": int(meta.get("seed", DEFAULT_SEED)),
         "controltrace_version": __version__,

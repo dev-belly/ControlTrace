@@ -45,6 +45,8 @@ def main(argv: list[str] | None = None) -> int:
         )
         if not result["review_evidence_bound"]:
             print("Legacy bundle: review history is valid but was not bound to an evidence snapshot.")
+        if result["legacy_timeline_order"]:
+            print("Legacy timeline: original string order is replayed; UTC chronology is not guaranteed.")
         return 0
     from controltrace.rules import run_tests
     from controltrace.store import initialize_db

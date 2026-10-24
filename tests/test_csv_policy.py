@@ -43,7 +43,7 @@ def test_visible_prefix_does_not_merge_distinct_strings():
     ]
 
 
-def test_v4_review_export_keeps_original_json_and_replays(tmp_path):
+def test_current_review_export_keeps_original_json_and_replays(tmp_path):
     db = tmp_path / "case.duckdb"
     initialize_db(db)
     finding_id = run_tests(db)[0]["finding_id"]
@@ -58,8 +58,8 @@ def test_v4_review_export_keeps_original_json_and_replays(tmp_path):
     assert verify_bundle(path)["review_evidence_bound"] is True
     with zipfile.ZipFile(io.BytesIO(bundle)) as archive:
         manifest = json.loads(archive.read("manifest.json"))
-        assert manifest["bundle_format_version"] == 4
-        assert manifest["controltrace_version"] == "0.2.9"
+        assert manifest["bundle_format_version"] == 5
+        assert manifest["controltrace_version"] == "0.2.10"
         assert json.loads(archive.read("reviews.json"))[finding_id][0]["notes"] == notes
 
 

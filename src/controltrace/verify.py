@@ -16,7 +16,7 @@ from controltrace import __version__
 from controltrace.data import DEMO_CUTOFF, SOURCE_TABLES
 from controltrace.exports import _csv_bytes, _json, exception_csv, finding_workpaper
 from controltrace.reviews import REVIEW_FIELDS, bind_review_history, validate_review_decision
-from controltrace.rules import RULES, evaluate
+from controltrace.rules import RULES, evaluate, evidence_timeline
 
 
 class BundleVerificationError(ValueError):
@@ -61,10 +61,11 @@ def verify_bundle(path: str | Path) -> dict[str, Any]:
         manifest = _read_json(archive, "manifest.json")
         _require(isinstance(manifest, dict), "Manifest must be a JSON object")
         bundle_format = manifest.get("bundle_format_version")
-        _require(bundle_format in (2, 3, 4),
+        _require(bundle_format in (2, 3, 4, 5),
                  "Unsupported bundle format; export again with this ControlTrace version")
         evidence_bound = bundle_format >= 3
         legacy_csv = bundle_format < 4
+        legacy_timeline = bundle_format < 5
         expected_files = manifest.get("files_sha256")
         _require(isinstance(expected_files, dict), "Manifest has no complete file hash list")
         _require(set(expected_files) == set(names) - {"manifest.json"},
@@ -88,7 +89,7 @@ def verify_bundle(path: str | Path) -> dict[str, Any]:
         _require(manifest.get("audit_cutoff") == DEMO_CUTOFF,
                  "Bundle cutoff does not match the current control rules")
         bundle_version = manifest.get("controltrace_version")
-        _require(bundle_version == {2: "0.2.7", 3: "0.2.8", 4: __version__}[bundle_format],
+        _require(bundle_version == {2: "0.2.7", 3: "0.2.8", 4: "0.2.9", 5: __version__}[bundle_format],
                  "Bundle was created by a different ControlTrace version")
         _require(_read_json(archive, "rules.json") == RULES,
                  "Rule catalog differs from the installed ControlTrace version")
@@ -105,6 +106,11 @@ def verify_bundle(path: str | Path) -> dict[str, Any]:
             source_rows[table] = rows
         data = {table: rows for table, rows in source_rows.items() if table != "expected_results"}
         replayed = evaluate(data)
+        if legacy_timeline:
+            # Old evidence fingerprints include the original timeline order.
+            # Replay those retained bytes without granting UTC-order guarantees.
+            for finding in replayed:
+                finding["timeline"] = evidence_timeline(finding["related_records"], legacy=True)
         all_ids = [finding["finding_id"] for finding in replayed]
         _require(len(all_ids) == len(set(all_ids)), "Replay produced duplicate finding IDs")
         _require(manifest.get("all_finding_ids") == all_ids,
@@ -191,4 +197,5 @@ def verify_bundle(path: str | Path) -> dict[str, Any]:
         "exported_findings": len(selected_ids),
         "scope": scope,
         "review_evidence_bound": evidence_bound,
+        "legacy_timeline_order": legacy_timeline,
     }
