@@ -1,0 +1,30 @@
+name: Feature request
+description: "Propose a concrete improvement to 源证据关联、控制判断、复核版本绑定与底稿重放."
+title: "[Feature]: "
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem and user workflow
+      description: Describe a task that the current contract makes difficult, with a small synthetic example.
+    validations:
+      required: true
+  - type: textarea
+    id: behavior
+    attributes:
+      label: Proposed behavior
+      description: "Explain inputs, outputs and failure behavior. Preserve the project's focus on 源证据关联、控制判断、复核版本绑定与底稿重放."
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: How to check the result
+      description: "注明控制 ID、发现 ID、证据变化前后、复核状态及 ZIP 格式版本；并发问题请按顺序列出两个会话的操作。"
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Existing approach and alternatives
+      description: Link relevant documentation or prior issues and explain the remaining gap.
