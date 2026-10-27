@@ -1,0 +1,45 @@
+name: Bug report
+description: "Reproduce a problem with 源证据关联、控制判断、复核版本绑定与底稿重放."
+title: "[Bug]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use synthetic or appropriately licensed public inputs. Do not attach private records or credentials.
+        Suspected vulnerabilities: follow [SECURITY.md](https://github.com/dev-belly/ControlTrace/blob/main/SECURITY.md).
+  - type: input
+    id: version
+    attributes:
+      label: Version or full commit
+      description: Include the installed package version and source revision when known.
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, Python version and relevant dependency versions.
+    validations:
+      required: true
+  - type: textarea
+    id: command
+    attributes:
+      label: Command or API call
+      description: Include the working directory assumptions and exact options.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproducible input and steps
+      description: "最小合成 HR/IAM/工单/部署记录，保留关联 ID、审计截止日和时区；不要上传真实企业底稿。"
+    validations:
+      required: true
+  - type: textarea
+    id: result
+    attributes:
+      label: Expected and actual result
+      description: "注明控制 ID、发现 ID、证据变化前后、复核状态及 ZIP 格式版本；并发问题请按顺序列出两个会话的操作。"
+    validations:
+      required: true
