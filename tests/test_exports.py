@@ -7,6 +7,7 @@ import io
 import json
 import zipfile
 
+import duckdb
 import pytest
 
 from controltrace.cli import main
@@ -14,6 +15,30 @@ from controltrace.exports import _json, exception_csv, finding_workpaper, workpa
 from controltrace.rules import run_tests
 from controltrace.store import get_finding, get_table_rows, initialize_db, save_review
 from controltrace.verify import BundleVerificationError, verify_bundle
+
+
+def test_blank_emergency_approver_stays_visible_through_database_and_bundle(tmp_path):
+    database = tmp_path / "blank-approver.duckdb"
+    initialize_db(database)
+    with duckdb.connect(str(database)) as connection:
+        connection.execute(
+            "UPDATE emergency_changes SET retrospective_approved_at = ?, "
+            "retrospective_approver_id = ? WHERE emergency_id = ?",
+            ["2025-06-21T09:00:00Z", " \t ", "EM005"],
+        )
+    finding = next(
+        item for item in run_tests(database)
+        if item["entity_id"] == "D005" and item["issue_code"] == "emergency_approver_unknown"
+    )
+    assert finding["classification"] == "manual_review"
+    source = next(
+        item["record"] for item in finding["related_records"]
+        if item["table"] == "emergency_changes"
+    )
+    assert source["retrospective_approver_id"] == " \t "
+    destination = tmp_path / "workpapers.zip"
+    destination.write_bytes(workpaper_zip(database, {finding["finding_id"]}))
+    assert verify_bundle(destination)["exported_findings"] == 1
 
 
 @pytest.mark.parametrize("payload", ["[]", "null", "42", '"not a manifest"'])
