@@ -493,11 +493,13 @@ def test_multiple_emergency_records_use_any_complete_approval_within_deadline():
         assert not _has(findings, "emergency_approval_overdue", "D006")
 
 
-def test_emergency_approval_timestamp_without_approver_needs_review():
+@pytest.mark.parametrize("approver", [None, "", " ", "\t\r\n", "\u00a0"])
+def test_emergency_approval_timestamp_without_approver_needs_review(approver):
     data = deepcopy(generate_demo_data())
-    _record(data, "emergency_changes", "emergency_id", "EM005")[
-        "retrospective_approved_at"
-    ] = "2025-06-21T09:00:00Z"
+    _record(data, "emergency_changes", "emergency_id", "EM005").update(
+        retrospective_approved_at="2025-06-21T09:00:00Z",
+        retrospective_approver_id=approver,
+    )
     findings = evaluate(data)
     assert _has(findings, "emergency_approver_unknown", "D005")
     assert not _has(findings, "emergency_approval_overdue", "D005")

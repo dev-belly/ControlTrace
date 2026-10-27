@@ -708,13 +708,13 @@ def evaluate(data: dict[str, list[dict]]) -> list[dict[str, Any]]:
         completed_approvals = [
             (approved, row) for row in matching_emergencies
             if (approved := parse_utc(row["retrospective_approved_at"])) is not None
-            and approved <= cutoff and row["retrospective_approver_id"]
+            and approved <= cutoff and (row["retrospective_approver_id"] or "").strip()
         ]
         incomplete_on_time = [
             row for row in matching_emergencies
             if (approved := parse_utc(row["retrospective_approved_at"])) is not None
             and deployed <= approved <= min(due, cutoff)
-            and not row["retrospective_approver_id"]
+            and not (row["retrospective_approver_id"] or "").strip()
         ]
         before_deployment = [
             row for approved, row in completed_approvals if approved < deployed
