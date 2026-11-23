@@ -16,6 +16,15 @@ uv run controltrace demo
 
 截图包含一次示范复核；新生成的数据库从未复核状态开始。选中异常后的[证据详情截图](assets/controltrace-finding.png)展示关联记录 ID、规则依据和事件时间线。
 
+## 浏览器证据工作台
+
+筛选五项控制自动发现的线索，查看按 UTC 排序的事件和关联原值。
+
+[工作台源码](docs/workbench/)
+
+克隆后直接打开 `docs/workbench/index.html`，即可离线筛选、查看明细并导出 CSV 或 JSON。
+运行 `python docs/workbench/build_data.py --check` 校验已提交的样例快照。
+
 ## 从数据到工作底稿
 
 ```text
