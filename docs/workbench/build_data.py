@@ -3,6 +3,8 @@
 import argparse
 import hashlib
 import json
+import sys
+from collections import Counter
 from pathlib import Path
 
 
@@ -49,10 +51,6 @@ def theme(accent, muted, base, glow):
         "hero-base": base,
         "hero-glow": glow,
     }
-
-
-from collections import Counter
-import sys
 
 
 REPOSITORY = "https://github.com/dev-belly/ControlTrace"
@@ -119,7 +117,7 @@ def build():
                     fact("控制", f"{finding['control_id']} · {rule['name']}"),
                     fact("系统", finding["system"]),
                     fact("主体", f"{finding['entity_type']} / {finding['entity_id']}"),
-                    fact("结论状态", kinds[finding["classification"]]),
+                    fact("规则结果", kinds[finding["classification"]]),
                     fact("证据 SHA-256", finding_fingerprint(finding)),
                 ],
                 "sections": sections,
